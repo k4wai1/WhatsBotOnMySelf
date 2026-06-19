@@ -1,0 +1,26 @@
+# ─── Dependencias ───
+node_modules/
+
+# ─── Sesión de WhatsApp (tokens, credenciales, datos sensibles) ───
+auth_info_baileys/
+
+# ─── Cachés y datos locales temporales ───
+cache/
+baileys_store_cache.json
+help_cache.json
+
+# ─── Estadísticas de uso ───
+statistics/
+
+# ─── Archivos de entorno con credenciales reales ───
+.env
+
+# ─── Archivos binarios / multimedia sin origen claro ───
+Fx5uEz0WwAAoQm7
+FyQsx7oXsAENZ6W
+FyVNae_X0AUn5DG
+
+# ─── Sistema ───
+.DS_Store
+Thumbs.db
+*.log

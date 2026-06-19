@@ -1,0 +1,2 @@
+sudo apt update && sudo apt install webp ffmpeg fastfetch -y
+sudo apt install fonts-hack-ttf

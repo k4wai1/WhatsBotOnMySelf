@@ -1,0 +1,11 @@
+ahora primero este addon es del antiguo bot quiero actualizar este ytam,bien copiarlo a mi nuevo bot, primero al usar .dólar añadiremos el precio de Airtm debajo de Binance: la web es esta, devuelve un .json "https://rates.airtm.io/" el objetivo es     "ves/usd": {
+
+       "addValue": 776.9,
+
+      "withdrawValue": 735.63
+
+    },
+
+
+
+primero devuélvelo en este mismo formato de addon después te diré para que pases el nuevo, es decir, conserva para tu generación de código la compatibilidad del archivo que te enmvie actualemte en este mensaje. ademas de eso añadiremos un multiplicador ej: al usar .dolar <n> mutipicara cada valor por eso deve admitir decimales y seguridad para montos esuverantemente altos

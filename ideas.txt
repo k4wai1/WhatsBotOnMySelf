@@ -1,0 +1,3 @@
+calculadora, minichatbot para cosulta simples, talvez con alguna skill de busqueda o similar. una libreta de nota via texto con are assic, audio to voice note, addon de descargas, 
+
+

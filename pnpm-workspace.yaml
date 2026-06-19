@@ -1,0 +1,6 @@
+allowBuilds:
+  '@lightpanda/browser': true
+  '@whiskeysockets/baileys': set this to true or false
+  canvas: true
+  protobufjs: set this to true or false
+  sharp: set this to true or false
