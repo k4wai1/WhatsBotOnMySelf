@@ -12,7 +12,32 @@ const qrcode = require('qrcode-terminal');
 require('dotenv').config();
 require('events').EventEmitter.defaultMaxListeners = 0;
 
-// ----- Store Personalizado (Solución definitiva para Baileys 2026) -----
+const CONFIG_PATH = path.join(__dirname, 'assets', 'config.json');
+
+// ─── Configuración persistente (prefixes) ──────────────────────────────────
+function loadPrefixes() {
+    try {
+        const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
+        const cfg = JSON.parse(raw);
+        if (Array.isArray(cfg.prefixes) && cfg.prefixes.length) return cfg.prefixes;
+    } catch (_) {}
+    return [',', '!', '/'];
+}
+
+function savePrefixes(list) {
+    try {
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify({ prefixes: list }, null, 2));
+    } catch (e) {
+        console.error('❌ No se pudo guardar config.json:', e.message);
+    }
+}
+
+// Garantizar que config.json exista desde el inicio
+if (!fs.existsSync(CONFIG_PATH)) {
+    savePrefixes([',', '!', '/']);
+}
+
+// ─── Store Personalizado (Solución definitiva para Baileys 2026) ─────────────
 // Suple la eliminación de makeInMemoryStore capturando la información nativamente.
 const store = {
     contacts: {}
@@ -33,7 +58,6 @@ setInterval(() => {
 }, 10_000);
 
 // Configuración de enrutamiento
-const PREFIXES = [',', '!', '/']; 
 const commandRegistry = new Map();
 
 async function startBot() {
@@ -137,13 +161,15 @@ async function startBot() {
 
         if (!text) return;
 
-        if (text.trim() === '.restart') {
+        // .restart / !restart / ,restart — funciona con cualquier prefix
+        const prefixes = loadPrefixes();
+        if (prefixes.some(p => text.trim() === p + 'restart')) {
             await sock.sendMessage(msg.key.remoteJid, { react: { text: '🔄', key: msg.key } });
             console.log('🔄 Señal de reinicio recibida.');
             process.exit(1);
         }
 
-        const usedPrefix = PREFIXES.find(p => text.startsWith(p));
+        const usedPrefix = prefixes.find(p => text.startsWith(p));
         if (!usedPrefix) return;
 
         const args = text.slice(usedPrefix.length).trim().split(/\s+/);
