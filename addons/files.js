@@ -1,0 +1,357 @@
+// addons/files.js
+const fs = require('fs');
+const path = require('path');
+const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
+
+const ROOT = path.join(__dirname, '..', 'files');
+const PAGE_SIZE = 10;
+const SESSION_TTL = 5 * 60 * 1000; // 5 min sin actividad
+
+// ─── Sesiones por chat ───────────────────────────────────────────────────────
+const sessions = {};
+
+function getSession(jid) {
+  let s = sessions[jid];
+  if (!s || Date.now() - s.t > SESSION_TTL) {
+    s = { cwd: ROOT, t: Date.now(), items: [], page: 0 };
+    sessions[jid] = s;
+  }
+  s.t = Date.now();
+  return s;
+}
+
+// ─── Utilidades ──────────────────────────────────────────────────────────────
+function insideRoot(p) {
+  return path.resolve(p).startsWith(ROOT);
+}
+
+function sortedEntries(dir) {
+  const e = fs.readdirSync(dir, { withFileTypes: true }).map(d => ({
+    name: d.name,
+    path: path.join(dir, d.name),
+    isDir: d.isDirectory()
+  }));
+  e.sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    return a.name.localeCompare(b.name, 'es', { sensitivity: 'base' });
+  });
+  return e;
+}
+
+function prettySize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatListing(session) {
+  const all = session.items;
+  if (!all.length) return null; // vacío → el handler manda el mensaje directamente
+
+  const total = Math.ceil(all.length / PAGE_SIZE);
+  if (session.page >= total) session.page = total - 1;
+
+  const start = session.page * PAGE_SIZE;
+  const page = all.slice(start, start + PAGE_SIZE);
+  const rel = path.relative(ROOT, session.cwd) || '.';
+
+  let out = `📁 \`files/${rel}\`  —  pág ${session.page + 1}/${total}\n`;
+  out += `─────────────\n`;
+
+  for (let i = 0; i < page.length; i++) {
+    const idx = start + i + 1;
+    const e = page[i];
+    if (e.isDir) {
+      out += `[${idx}] 📂 ${e.name}/\n`;
+    } else {
+      let size = '';
+      try { size = ` (${prettySize(fs.statSync(e.path).size)})`; } catch (_) {}
+      out += `[${idx}] 📄 ${e.name}${size}\n`;
+    }
+  }
+  if (total > 1) out += `\n↔️ \`.files n\` / \`.files p\``;
+  return out;
+}
+
+// ─── Comandos ────────────────────────────────────────────────────────────────
+const commands = ['files', 'f'];
+
+async function handler(sock, msg, args, store) {
+  const jid = msg.key.remoteJid;
+  const isOwner = msg.key.fromMe;
+
+  // ❌ Solo el host (dueño del número) puede usar este addon
+  if (!isOwner) {
+    await sock.sendMessage(jid, { react: { text: '🚫', key: msg.key } });
+    return;
+  }
+
+  const ses = getSession(jid);
+  const sub = args[0];
+
+  // ── Sin args → listar ──────────────────────────────────────────────────────
+  if (!sub) {
+    ses.items = sortedEntries(ses.cwd);
+    const out = formatListing(ses);
+    if (!out) {
+      await sock.sendMessage(jid, { text: '📂 La carpeta está vacía.' });
+      return;
+    }
+    await sock.sendMessage(jid, { text: out });
+    return;
+  }
+
+  // ── Navegación: cd <idx> / back / root ────────────────────────────────────────
+  if (sub === 'cd' || /^\d+$/.test(sub)) {
+    const idx = parseInt(sub === 'cd' ? args[1] : sub, 10) - 1;
+    const target = ses.items[idx];
+    if (!target || !target.isDir) {
+      await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
+      return;
+    }
+    if (!insideRoot(target.path)) {
+      await sock.sendMessage(jid, { react: { text: '🚫', key: msg.key } });
+      return;
+    }
+    ses.cwd = target.path;
+    ses.page = 0;
+    ses.items = sortedEntries(ses.cwd);
+    const out = formatListing(ses);
+    await sock.sendMessage(jid, { text: out || '📂 Vacía.' });
+    return;
+  }
+
+  if (sub === 'back') {
+    const parent = path.dirname(ses.cwd);
+    if (!insideRoot(parent) || parent === ses.cwd) {
+      await sock.sendMessage(jid, { text: '📂 Ya estás en la raíz.' });
+      return;
+    }
+    ses.cwd = parent;
+    ses.page = 0;
+    ses.items = sortedEntries(ses.cwd);
+    const out = formatListing(ses);
+    await sock.sendMessage(jid, { text: out || '📂 Vacía.' });
+    return;
+  }
+
+  if (sub === 'root') {
+    ses.cwd = ROOT;
+    ses.page = 0;
+    ses.items = sortedEntries(ses.cwd);
+    const out = formatListing(ses);
+    await sock.sendMessage(jid, { text: out || '📂 Vacía.' });
+    return;
+  }
+
+  // ── Paginación ───────────────────────────────────────────────────────────────
+  if (sub === 'n' || sub === 'next') {
+    const total = Math.ceil(ses.items.length / PAGE_SIZE);
+    if (ses.page + 1 < total) ses.page++;
+    const out = formatListing(ses);
+    await sock.sendMessage(jid, { text: out || '📂 Vacía.' });
+    return;
+  }
+
+  if (sub === 'p' || sub === 'prev') {
+    if (ses.page > 0) ses.page--;
+    const out = formatListing(ses);
+    await sock.sendMessage(jid, { text: out || '📂 Vacía.' });
+    return;
+  }
+
+  // ── Descargar: get <idx1> [idx2...] ──────────────────────────────────────────
+  if (sub === 'get') {
+    const indices = args.slice(1).map(x => parseInt(x, 10) - 1);
+    for (const idx of indices) {
+      const target = ses.items[idx];
+      if (!target || target.isDir) {
+        await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
+        continue;
+      }
+      try {
+        await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
+        const buffer = fs.readFileSync(target.path);
+        await sock.sendMessage(jid, {
+          document: buffer,
+          fileName: target.name,
+          mimetype: 'application/octet-stream'
+        });
+      } catch (e) {
+        console.error(`❌ [files] Error enviando ${target.name}:`, e.message);
+        await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+      }
+    }
+    return;
+  }
+
+  // ── Subir archivo (respondiendo a un documento/imagen/video/audio) ────────────
+  if (sub === 'up') {
+    // Buscar mensaje citado O el propio mensaje
+    const ctx = msg.message?.extendedTextMessage?.contextInfo;
+    const targetMsg = ctx?.quotedMessage || msg.message;
+
+    const mediaTypes = ['documentMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage'];
+    const mediaKey = mediaTypes.find(k => targetMsg[k]);
+    if (!mediaKey) {
+      await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
+      return;
+    }
+
+    try {
+      await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
+
+      const stream = await downloadContentFromMessage(targetMsg[mediaKey], mediaKey.replace('Message', ''));
+      let buf = Buffer.from([]);
+      for await (const chunk of stream) buf = Buffer.concat([buf, chunk]);
+
+      // Nombre: del documento original o generado
+      let fname = targetMsg[mediaKey]?.fileName || `file_${Date.now()}`;
+      // Si no tiene extensión, inferirla burdamente del mimetype
+      if (!path.extname(fname)) {
+        const mt = targetMsg[mediaKey]?.mimetype || '';
+        const ext = mt.split('/')[1]?.split(';')[0] || 'bin';
+        fname += `.${ext}`;
+      }
+
+      const dest = path.join(ses.cwd, fname);
+      // No sobreescribir
+      if (fs.existsSync(dest)) {
+        await sock.sendMessage(jid, { text: `⚠️ \`${fname}\` ya existe.` });
+        return;
+      }
+
+      fs.writeFileSync(dest, buf);
+      await sock.sendMessage(jid, { text: `✅ \`${fname}\` subido a \`files/${path.relative(ROOT, ses.cwd)}\`` });
+    } catch (e) {
+      console.error(`❌ [files] Error subiendo:`, e.message);
+      await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+    }
+    return;
+  }
+
+  // ── Eliminar: rm <idx1> [idx2...] ────────────────────────────────────────────
+  if (sub === 'rm') {
+    let deleted = [];
+    for (const raw of args.slice(1)) {
+      const idx = parseInt(raw, 10) - 1;
+      const target = ses.items[idx];
+      if (!target) continue;
+      try {
+        if (target.isDir) {
+          fs.rmSync(target.path, { recursive: true, force: true });
+        } else {
+          fs.unlinkSync(target.path);
+        }
+        deleted.push(target.name);
+      } catch (e) {
+        console.error(`❌ [files] Error eliminando ${target.name}:`, e.message);
+      }
+    }
+    if (!deleted.length) {
+      await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
+      return;
+    }
+    // Refrescar listing
+    ses.items = sortedEntries(ses.cwd);
+    await sock.sendMessage(jid, { text: `🗑️ Eliminado: ${deleted.join(', ')}` });
+    return;
+  }
+
+  // ── Mover: mv <idx> <destDir> ────────────────────────────────────────────────
+  if (sub === 'mv') {
+    const srcIdx = parseInt(args[1], 10) - 1;
+    const destIdx = parseInt(args[2], 10) - 1;
+    const src = ses.items[srcIdx];
+    const dest = ses.items[destIdx];
+
+    if (!src || !dest || !dest.isDir) {
+      await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
+      return;
+    }
+
+    try {
+      const newPath = path.join(dest.path, src.name);
+      if (fs.existsSync(newPath)) {
+        await sock.sendMessage(jid, { text: `⚠️ \`${src.name}\` ya existe en el destino.` });
+        return;
+      }
+      fs.renameSync(src.path, newPath);
+      ses.items = sortedEntries(ses.cwd);
+      await sock.sendMessage(jid, { text: `📦 \`${src.name}\` movido a \`${dest.name}/\`` });
+    } catch (e) {
+      console.error(`❌ [files] Error moviendo:`, e.message);
+      await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+    }
+    return;
+  }
+
+  // ── Buscar: find <palabra> ───────────────────────────────────────────────────
+  if (sub === 'find') {
+    const q = args.slice(1).join(' ').toLowerCase();
+    if (!q) {
+      await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
+      return;
+    }
+    const all = sortedEntries(ses.cwd);
+    const filtered = all.filter(e => e.name.toLowerCase().includes(q));
+    if (!filtered.length) {
+      await sock.sendMessage(jid, { text: `🔍 Sin resultados para "${q}".` });
+      return;
+    }
+    ses.items = filtered;
+    ses.page = 0;
+    const out = formatListing(ses);
+    await sock.sendMessage(jid, { text: out || '📂 Vacía.' });
+    return;
+  }
+
+  // ── Crear carpeta: mkdir <nombre> ────────────────────────────────────────────
+  if (sub === 'mkdir') {
+    const name = args.slice(1).join(' ');
+    if (!name) {
+      await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
+      return;
+    }
+    const dirPath = path.join(ses.cwd, name);
+    if (fs.existsSync(dirPath)) {
+      await sock.sendMessage(jid, { text: `⚠️ \`${name}\` ya existe.` });
+      return;
+    }
+    try {
+      fs.mkdirSync(dirPath, { recursive: true });
+      ses.items = sortedEntries(ses.cwd);
+      await sock.sendMessage(jid, { text: `📁 Carpeta \`${name}/\` creada.` });
+    } catch (e) {
+      console.error(`❌ [files] Error creando carpeta:`, e.message);
+      await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+    }
+    return;
+  }
+
+  // ── Ayuda ────────────────────────────────────────────────────────────────────
+  if (sub === 'help' || sub === 'h' || sub === '?') {
+    const help = `📁 *files — explorador de archivos*
+─────────────
+Sin args        → listar contenido
+\`.f <N>\`        → entrar a carpeta [N]
+\`.f cd <N>\`     → entrar a carpeta [N]
+\`.f back\`       → subir un nivel
+\`.f root\`       → ir a la raíz \`files/\`
+\`.f n\` / \`.f p\` → paginar (next/prev)
+\`.f get <N...>\` → descargar archivo(s)
+\`.f up\`         → subir archivo (respondiendo a un documento)
+\`.f rm <N...>\`  → eliminar archivo(s)/carpeta(s)
+\`.f mv <A> <B>\` → mover ítem [A] a carpeta [B]
+\`.f find <q>\`   → buscar archivos por nombre
+\`.f mkdir <nom>\`→ crear carpeta
+\`.f help\`       → esta ayuda`;
+    await sock.sendMessage(jid, { text: help });
+    return;
+  }
+
+  // ── Comodín: mostrar ayuda ──────────────────────────────────────────────────
+  await sock.sendMessage(jid, { text: '❓ Usa `.f help` para ver los comandos.' });
+}
+
+module.exports = { commands, handler };

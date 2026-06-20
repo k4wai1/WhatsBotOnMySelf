@@ -28,6 +28,10 @@ ideas.txt
 # ─── Assets de prueba / multimedia sin origen claro ───
 assets/hopecore/
 
+# ─── Archivos subidos por el addon files ───
+files/*
+!files/.gitkeep
+
 # ─── Sistema ───
 .DS_Store
 Thumbs.db
