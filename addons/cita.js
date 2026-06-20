@@ -1,63 +1,63 @@
 // addons/cita.js
 
 const path = require('path');
-const fs = require('fs').promises;
-const { createCanvas, loadImage, registerFont } = require('canvas');
+const fs = require('fs');
 const sharp = require('sharp');
+const satori = require('satori').default || require('satori');
 
+// 1. CARGA SÍNCRONA DE FUENTES
+let fontNormalBuffer, fontBoldBuffer;
 try {
-  registerFont(path.join(__dirname, '../assets/fonts/firasanscondensed-book.otf'), { family: 'FiraSansBook' });
-  registerFont(path.join(__dirname, '../assets/fonts/firasanscondensed-italic.otf'), { family: 'FiraSansItalic' });
+  fontNormalBuffer = fs.readFileSync(path.join(__dirname, '../assets/fonts/firasanscondensed-book.otf'));
+  fontBoldBuffer = fs.readFileSync(path.join(__dirname, '../assets/fonts/firasanscondensed-bold.otf'));
 } catch (error) {
-  console.warn('⚠️ No se pudieron cargar las fuentes personalizadas. Revisa la ruta de los archivos .otf');
+  console.error('❌ Error crítico: No se encontraron las fuentes .otf.');
 }
 
-// ---------------------- Funciones auxiliares de dibujo ----------------------
-function roundRect(ctx, x, y, w, h, r) {
-  if (w < 2 * r) r = w / 2;
-  if (h < 2 * r) r = h / 2;
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-  ctx.lineTo(x + r, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
-  ctx.closePath();
-  return ctx;
-}
+// ---------------------- Funciones Auxiliares ----------------------
 
-function wrapText(ctx, text, maxWidth) {
-  const words = text.split(' ');
-  const lines = [];
-  let currentLine = '';
-  for (const word of words) {
-    const testLine = currentLine ? `${currentLine} ${word}` : word;
-    const metrics = ctx.measureText(testLine);
-    if (metrics.width > maxWidth && currentLine) {
-      lines.push(currentLine);
-      currentLine = word;
-    } else {
-      currentLine = testLine;
-    }
+async function fetchProfilePictureWithTimeout(sock, pureJid, timeoutMs = 6000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const urlPromise = sock.profilePictureUrl(pureJid, 'image').catch(() => sock.profilePictureUrl(pureJid, 'preview'));
+    const url = await Promise.race([
+      urlPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout URL')), timeoutMs))
+    ]);
+    if (!url) throw new Error('No URL');
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    return Buffer.from(await response.arrayBuffer());
+  } catch (error) {
+    clearTimeout(timeoutId);
+    return null;
   }
-  if (currentLine) lines.push(currentLine);
-  return lines;
 }
 
-function drawCenteredParagraph(ctx, lines, yStart, lineHeight, centerX) {
-  let y = yStart;
-  for (const line of lines) {
-    ctx.fillText(line, centerX, y);
-    y += lineHeight;
+async function getRandomHopecoreImage() {
+  const fsAsync = require('fs').promises;
+  const hopecoreDir = path.join(__dirname, '../assets/hopecore');
+  try {
+    const files = await fsAsync.readdir(hopecoreDir);
+    const images = files.filter(f => /\.(jpg|jpeg|png)$/i.test(f));
+    if (images.length === 0) return null;
+    const randomFile = images[Math.floor(Math.random() * images.length)];
+    return await fsAsync.readFile(path.join(hopecoreDir, randomFile));
+  } catch (err) {
+    return null;
   }
-  return y;
 }
 
-// ---------------------- Resolución de usuario (LID y nombres) ----------------------
+function getOptimalFontSize(text, width, height, maxFontSize) {
+  const textLength = text.length || 1;
+  const boxArea = width * height;
+  const targetArea = boxArea * 0.70; 
+  let calculatedSize = Math.floor(Math.sqrt(targetArea / (textLength * 0.55)));
+  return Math.min(calculatedSize, maxFontSize);
+}
+
+// ---------------------- Resolución de usuario Avanzada ----------------------
 async function resolveUser(targetIdRaw, sock, msg, store, chatJid) {
   let targetId = targetIdRaw;
   let pureJid = '';
@@ -155,24 +155,7 @@ async function resolveUser(targetIdRaw, sock, msg, store, chatJid) {
   return { pureJid, userName, phoneNumber };
 }
 
-// ---------------------- Obtener imagen aleatoria de la carpeta hopecore ----------------------
-async function getRandomHopecoreImage() {
-  const hopecoreDir = path.join(__dirname, '../assets/hopecore');
-  try {
-    const files = await fs.readdir(hopecoreDir);
-    const images = files.filter(f => /\.(jpg|jpeg|png)$/i.test(f));
-    if (images.length === 0) return null;
-    const randomFile = images[Math.floor(Math.random() * images.length)];
-    const filePath = path.join(hopecoreDir, randomFile);
-    const buffer = await fs.readFile(filePath);
-    return buffer;
-  } catch (err) {
-    console.warn('⚠️ No se pudo leer la carpeta hopecore:', err.message);
-    return null;
-  }
-}
-
-// ---------------------- Comando principal ----------------------
+// ---------------------- Comando Principal ----------------------
 module.exports = {
   commands: ['cita'],
   handler: async (sock, msg, args, store) => {
@@ -180,234 +163,234 @@ module.exports = {
     try {
       await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
 
-      // 1. Determinar el ID objetivo (quién es citado)
-      let targetId;
-      const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
-      const isGroup = jid.endsWith('@g.us');
-
-      if (contextInfo?.mentionedJid?.length > 0) {
-        targetId = contextInfo.mentionedJid[0];
-      } else if (contextInfo?.quotedMessage) {
-        targetId = contextInfo.participant || (isGroup ? msg.key.participant : jid);
-      } else {
-        targetId = msg.key.participant || (msg.key.fromMe ? sock.user.id : jid);
-      }
-
-      // 2. Resolver usuario (número real + nombre)
-      const { pureJid, userName, phoneNumber } = await resolveUser(targetId, sock, msg, store, jid);
-
-      // 3. Obtener imagen (foto de perfil o fallback a hopecore o iniciales)
-      let imgBuffer;
-      let ppUrl = null;
-
-      // Intento de foto de perfil real
-      try {
-        ppUrl = await sock.profilePictureUrl(pureJid, 'image');
-      } catch (e1) {
-        try {
-          ppUrl = await sock.profilePictureUrl(pureJid, 'preview');
-        } catch (e2) {
-          // No hay foto de perfil
-        }
-      }
-
-      if (ppUrl) {
-        // Si hay foto real, la usamos
-        const response = await fetch(ppUrl);
-        imgBuffer = Buffer.from(await response.arrayBuffer());
-      } else {
-        // No hay foto -> intentar usar una imagen aleatoria de hopecore
-        const hopecoreBuffer = await getRandomHopecoreImage();
-        if (hopecoreBuffer) {
-          imgBuffer = hopecoreBuffer;
-          console.log('✨ Usando imagen aleatoria de hopecore como fallback');
-        } else {
-          // Último recurso: avatar con iniciales
-          const safeName = encodeURIComponent(userName);
-          const fallbackUrl = `https://ui-avatars.com/api/?name=${safeName}&background=random&color=fff&size=512`;
-          const response = await fetch(fallbackUrl);
-          imgBuffer = Buffer.from(await response.arrayBuffer());
-          console.log('⚠️ Sin hopecore, usando avatar con iniciales');
-        }
-      }
-
-      // 4. Parsear argumentos y texto de cita
-      const argsStr = args.join(' ');
-      const isVertical = argsStr.includes('--vertical') || argsStr.includes('-v');
-      const isColor = argsStr.includes('--color');
-
-      let quoteText = '';
-      const doubleQuoteMatch = argsStr.match(/"([^"]*)"/);
-      const singleQuoteMatch = argsStr.match(/'([^']*)'/);
-      if (doubleQuoteMatch) quoteText = doubleQuoteMatch[1];
-      else if (singleQuoteMatch) quoteText = singleQuoteMatch[1];
-      else {
-        let rest = argsStr
-          .replace(/--vertical/g, '')
-          .replace(/-v/g, '')
-          .replace(/--color/g, '')
-          .trim();
-        if (rest) quoteText = rest;
-      }
-
-      const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-      if (!quoteText && quotedMsg) {
-        quoteText = quotedMsg.conversation || quotedMsg.extendedTextMessage?.text || '';
-      }
-
-      if (!quoteText) {
-        await sock.sendMessage(jid, { text: '❌ Debes escribir un texto para citar o responder a un mensaje.' }, { quoted: msg });
-        await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+      if (!fontNormalBuffer || !fontBoldBuffer) {
+        await sock.sendMessage(jid, { text: '❌ Motor de renderizado de fuentes no disponible.' }, { quoted: msg });
         return;
       }
 
-      const MAX_CHARS = 560;
-      if (quoteText.length > MAX_CHARS) {
-        quoteText = quoteText.substring(0, MAX_CHARS - 3) + '...';
+      // --- PARSEO DE ARGUMENTOS ---
+      let isVertical = false;
+      let isHorizontal = false;
+      let isColor = false;
+      const cleanArgs = [];
+
+      for (const arg of args) {
+        const lower = arg.toLowerCase();
+        if (lower === 'v' || lower === 'vertical') isVertical = true;
+        else if (lower === 'h' || lower === 'horizontal') isHorizontal = true;
+        else if (lower === 'c' || lower === 'color') isColor = true;
+        else cleanArgs.push(arg);
       }
 
-      // 5. Aplicar escala de grises si no hay --color
-      if (!isColor) {
-        imgBuffer = await sharp(imgBuffer).grayscale().toBuffer();
+      // Aleatoriedad si no se especifica orientación
+      if (!isVertical && !isHorizontal) {
+        isVertical = Math.random() > 0.5;
+        isHorizontal = !isVertical;
       }
 
-      // 6. Configurar canvas según orientación
-      let width, height, avatarSize, avatarX, avatarY;
-      if (isVertical) {
-        width = 720;
-        height = 960;
-        avatarSize = width;
-        avatarX = 0;
-        avatarY = 0;
-      } else {
-        width = 1280;
-        height = 720;
-        avatarSize = 400;
-        avatarX = 40;
-        avatarY = (height - avatarSize) / 2;
-      }
+      // Extracción y limpieza del texto (eliminando saltos de línea)
+      let quoteText = cleanArgs.join(' ').replace(/\n/g, ' ').trim();
+      const quoteMatch = quoteText.match(/(["'])(.*?)\1/);
+      if (quoteMatch) quoteText = quoteMatch[2];
 
-      const canvas = createCanvas(width, height);
-      const ctx = canvas.getContext('2d');
-
-      // Fondo negro (se verá detrás de la imagen si no cubre todo)
-      ctx.fillStyle = '#000000';
-      ctx.fillRect(0, 0, width, height);
-
-      // Cargar y dibujar la imagen (foto real, hopecore o iniciales)
-      const avatarImage = await loadImage(imgBuffer);
-      if (isVertical) {
-        // La imagen ocupa todo el ancho y la parte superior
-        ctx.drawImage(avatarImage, avatarX, avatarY, width, avatarSize);
-      } else {
-        ctx.save();
-        roundRect(ctx, avatarX, avatarY, avatarSize, avatarSize, 20);
-        ctx.clip();
-        ctx.drawImage(avatarImage, avatarX, avatarY, avatarSize, avatarSize);
-        ctx.restore();
-      }
-
-      // Gradiente para la zona de texto (oscurece la imagen gradualmente)
-      if (isVertical) {
-        const gradient = ctx.createLinearGradient(0, 0, 0, avatarSize);
-        gradient.addColorStop(0, 'rgba(0,0,0,0)');
-        gradient.addColorStop(0.5, 'rgba(0,0,0,0.2)');
-        gradient.addColorStop(1, 'rgba(0,0,0,1)');
-        ctx.fillStyle = gradient;
-        ctx.fillRect(0, 0, width, avatarSize);
-      } else {
-        const gradientStart = width * 0.8;
-        const gradient = ctx.createLinearGradient(gradientStart, 0, width, 0);
-        gradient.addColorStop(0, 'rgba(0,0,0,0)');
-        gradient.addColorStop(0.5, 'rgba(0,0,0,0.7)');
-        gradient.addColorStop(1, 'rgba(0,0,0,0.95)');
-        ctx.fillStyle = gradient;
-        ctx.fillRect(gradientStart, 0, width - gradientStart, height);
-      }
-
-      // 7. Renderizar texto (cita, nombre y número)
-      const quotedFullText = `“${quoteText}”`;
-      let fontSizeTitle = 60;
-      let lineHeight = 0;
-      let quoteLines = [];
-      let centerX, startY;
-
-      const nameMargin = 20;
-      const phoneMargin = 10;
-      let fontSizeName = isVertical ? 28 : 24;
-      let fontSizePhone = isVertical ? 20 : 18;
-      let nameY, phoneY;
-
-      ctx.textBaseline = 'top';
-      ctx.textAlign = 'center';
-
-      if (isVertical) {
-        const bottomPadding = 40;
-        phoneY = height - bottomPadding - fontSizePhone;
-        nameY = phoneY - phoneMargin - fontSizeName;
-
-        const boxTop = height * 0.60;
-        const boxHeight = nameY - 20 - boxTop;
-        const boxLeftMargin = width * 0.10;
-        const maxQuoteWidth = width - (boxLeftMargin * 2);
-        centerX = width / 2;
-
-        let fits = false;
-        while (!fits && fontSizeTitle > 10) {
-          ctx.font = `${fontSizeTitle}px "FiraSansBook", "Segoe UI", sans-serif`;
-          lineHeight = fontSizeTitle * 1.3;
-          quoteLines = wrapText(ctx, quotedFullText, maxQuoteWidth);
-          const quoteHeight = quoteLines.length * lineHeight;
-          if (quoteHeight <= boxHeight) fits = true;
-          else fontSizeTitle--;
+      const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
+      let targetId = msg.key.participant || (msg.key.fromMe ? sock.user.id : jid);
+      
+      if (contextInfo?.mentionedJid?.length > 0) {
+        targetId = contextInfo.mentionedJid[0];
+      } else if (contextInfo?.quotedMessage) {
+        targetId = contextInfo.participant || (jid.endsWith('@g.us') ? msg.key.participant : jid);
+        if (!quoteText) {
+          const qm = contextInfo.quotedMessage;
+          quoteText = (qm.conversation || qm.extendedTextMessage?.text || '').replace(/\n/g, ' ').trim();
         }
-        const finalQuoteHeight = quoteLines.length * lineHeight;
-        startY = boxTop + (boxHeight - finalQuoteHeight) / 2;
-      } else {
-        const textAreaXMin = avatarX + avatarSize + 40;
-        const textAreaXMax = width - 40;
-        const maxQuoteWidth = textAreaXMax - textAreaXMin;
-        centerX = textAreaXMin + maxQuoteWidth / 2;
-        fontSizeTitle = 34;
-        ctx.font = `${fontSizeTitle}px "FiraSansBook", "Segoe UI", sans-serif`;
-        lineHeight = fontSizeTitle * 1.3;
-        quoteLines = wrapText(ctx, quotedFullText, maxQuoteWidth);
-        const quoteHeight = quoteLines.length * lineHeight;
-        const totalTextHeight = quoteHeight + nameMargin + fontSizeName + phoneMargin + fontSizePhone;
-        startY = (height - totalTextHeight) / 2;
       }
 
-      ctx.fillStyle = '#ffffff';
-      ctx.font = `${fontSizeTitle}px "FiraSansBook", "Segoe UI", sans-serif`;
-      let currentY = drawCenteredParagraph(ctx, quoteLines, startY, lineHeight, centerX);
+      if (!quoteText) {
+        await sock.sendMessage(jid, { text: '❌ Escribe un texto para citar o responde a un mensaje.' }, { quoted: msg });
+        return;
+      }
+      if (quoteText.length > 560) quoteText = quoteText.substring(0, 557) + '...';
 
-      if (isVertical) currentY = nameY;
-      else currentY += nameMargin;
-      ctx.font = `${fontSizeName}px "FiraSansItalic", "Segoe UI", sans-serif`;
-      ctx.fillStyle = '#eeeeee';
-      ctx.fillText(userName, centerX, currentY);
+      const { pureJid, userName, phoneNumber } = await resolveUser(targetId, sock, msg, store, jid);
 
-      if (isVertical) currentY = phoneY;
-      else currentY += fontSizeName + phoneMargin;
-      ctx.font = `${fontSizePhone}px "FiraSansBook", "Segoe UI", sans-serif`;
-      ctx.fillStyle = 'rgba(255,255,255,0.5)';
-      ctx.fillText(phoneNumber, centerX, currentY);
+      // Obtener Avatar
+      let imgBuffer = await fetchProfilePictureWithTimeout(sock, pureJid, 6000);
+      if (!imgBuffer) {
+        imgBuffer = await getRandomHopecoreImage();
+        if (!imgBuffer) {
+          const safeName = encodeURIComponent(userName);
+          const response = await fetch(`https://ui-avatars.com/api/?name=${safeName}&background=random&color=fff&size=512`);
+          imgBuffer = Buffer.from(await response.arrayBuffer());
+        }
+      }
 
-      // 8. Enviar imagen
-      const finalBuffer = canvas.toBuffer('image/png');
-      await sock.sendMessage(jid, { image: finalBuffer, caption: `📸 *Cita generada*` }, { quoted: msg });
+      // --- INICIO DE COMPOSICIÓN GRÁFICA ---
+      let baseImg = sharp(imgBuffer);
+      if (!isColor) baseImg = baseImg.grayscale();
+
+      const words = `“${quoteText}”`.split(/\s+/);
+      const textElements = words.map(word => ({
+        type: 'span',
+        props: {
+          style: { fontWeight: Math.random() < 0.25 ? 700 : 400, marginRight: '8px' },
+          children: word
+        }
+      }));
+
+      let finalImageBuffer;
+
+      if (isVertical) {
+        // --- RENDERIZADO VERTICAL (720x960) ---
+        const width = 720;
+        const height = 960;
+
+        const baseCanvas = await sharp({
+          create: { width, height, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 1 } }
+        }).png().toBuffer();
+
+        const avatarLayer = await baseImg.resize(720, 720, { fit: 'cover', position: 'center' }).png().toBuffer();
+
+        const overlaySvg = Buffer.from(`
+          <svg width="${width}" height="${height}">
+            <defs>
+              <linearGradient id="fadeV" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="black" stop-opacity="0" />
+                <stop offset="100%" stop-color="black" stop-opacity="1" />
+              </linearGradient>
+            </defs>
+            <rect x="0" y="576" width="720" height="144" fill="url(#fadeV)" />
+            <rect x="0" y="720" width="720" height="240" fill="black" />
+          </svg>
+        `);
+
+        const fontSize = getOptimalFontSize(quoteText, 640, 330, 60);
+
+        const satoriSvg = await satori({
+          type: 'div',
+          props: {
+            style: { width: '720px', height: '960px', position: 'relative', fontFamily: 'FiraSans', display: 'flex' },
+            children: [
+              // Caja de Cita (Absolute y Centrado Absoluto)
+              {
+                type: 'div',
+                props: {
+                  style: {
+                    position: 'absolute', top: '520px', left: '40px', width: '640px', height: '330px',
+                    display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignContent: 'center', alignItems: 'center',
+                    color: '#ffffff', fontSize: `${fontSize}px`, textShadow: '2px 2px 8px rgba(0,0,0,0.9)', textAlign: 'center'
+                  },
+                  children: textElements
+                }
+              },
+              // Footer: Nombre y Teléfono (Absolute)
+              {
+                type: 'div',
+                props: {
+                  style: {
+                    position: 'absolute', top: '880px', left: '0', width: '720px',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center'
+                  },
+                  children: [
+                    { type: 'span', props: { style: { fontSize: '28px', color: '#eeeeee', fontStyle: 'italic', textShadow: '1px 1px 4px rgba(0,0,0,0.8)' }, children: userName } },
+                    { type: 'span', props: { style: { fontSize: '20px', color: 'rgba(255,255,255,0.6)', marginTop: '4px' }, children: phoneNumber } }
+                  ]
+                }
+              }
+            ]
+          }
+        }, { width, height, fonts: [{ name: 'FiraSans', data: fontNormalBuffer, weight: 400, style: 'normal' }, { name: 'FiraSans', data: fontBoldBuffer, weight: 700, style: 'normal' }], loadAdditionalAsset: async (code, segment) => (code === 'emoji' ? `https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/${segment}.svg` : undefined) });
+
+        const textOverlayBuffer = await sharp(Buffer.from(satoriSvg)).png().toBuffer();
+
+        finalImageBuffer = await sharp(baseCanvas)
+          .composite([{ input: avatarLayer, top: 0, left: 0 }, { input: overlaySvg, top: 0, left: 0 }, { input: textOverlayBuffer, top: 0, left: 0 }])
+          .png().toBuffer();
+
+      } else {
+        // --- RENDERIZADO HORIZONTAL (1280x720) ---
+        const width = 1280;
+        const height = 720;
+
+        const baseCanvas = await sharp({
+          create: { width, height, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 1 } }
+        }).png().toBuffer();
+
+        const rx = 31;
+        const maskSvg = Buffer.from(`<svg><rect x="0" y="0" width="620" height="620" rx="${rx}" ry="${rx}" fill="white" /></svg>`);
+        
+        const avatarLayer = await baseImg
+          .resize(620, 620, { fit: 'cover', position: 'center' })
+          .composite([{ input: maskSvg, blend: 'dest-in' }])
+          .png().toBuffer();
+
+        const overlaySvg = Buffer.from(`
+          <svg width="620" height="620">
+            <defs>
+              <linearGradient id="fadeH" x1="1" y1="0" x2="0" y2="0">
+                <stop offset="0%" stop-color="black" stop-opacity="1" />
+                <stop offset="20%" stop-color="black" stop-opacity="0" />
+              </linearGradient>
+            </defs>
+            <rect x="0" y="0" width="620" height="620" fill="url(#fadeH)" />
+          </svg>
+        `);
+
+        const fontSize = getOptimalFontSize(quoteText, 630, 440, 60);
+
+        const satoriSvg = await satori({
+          type: 'div',
+          props: {
+            style: { width: '1280px', height: '720px', position: 'relative', fontFamily: 'FiraSans', display: 'flex' },
+            children: [
+              // Caja de Cita
+              {
+                type: 'div',
+                props: {
+                  style: {
+                    position: 'absolute', top: '100px', left: '600px', width: '630px', height: '440px',
+                    display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignContent: 'center', alignItems: 'center',
+                    color: '#ffffff', fontSize: `${fontSize}px`, textShadow: '2px 2px 8px rgba(0,0,0,0.9)', textAlign: 'center'
+                  },
+                  children: textElements
+                }
+              },
+              // Footer
+              {
+                type: 'div',
+                props: {
+                  style: {
+                    position: 'absolute', top: '560px', left: '600px', width: '630px', 
+                    display: 'flex', flexDirection: 'column', alignItems: 'center'
+                  },
+                  children: [
+                    { type: 'span', props: { style: { fontSize: '28px', color: '#eeeeee', fontStyle: 'italic', textShadow: '1px 1px 4px rgba(0,0,0,0.8)' }, children: userName } },
+                    { type: 'span', props: { style: { fontSize: '20px', color: 'rgba(255,255,255,0.6)', marginTop: '4px' }, children: phoneNumber } }
+                  ]
+                }
+              }
+            ]
+          }
+        }, { width, height, fonts: [{ name: 'FiraSans', data: fontNormalBuffer, weight: 400, style: 'normal' }, { name: 'FiraSans', data: fontBoldBuffer, weight: 700, style: 'normal' }], loadAdditionalAsset: async (code, segment) => (code === 'emoji' ? `https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/${segment}.svg` : undefined) });
+
+        const textOverlayBuffer = await sharp(Buffer.from(satoriSvg)).png().toBuffer();
+
+        const compositedAvatar = await sharp(avatarLayer).composite([{ input: overlaySvg, blend: 'over' }]).png().toBuffer();
+
+        finalImageBuffer = await sharp(baseCanvas)
+          .composite([
+            { input: compositedAvatar, top: 50, left: 50 },
+            { input: textOverlayBuffer, top: 0, left: 0 }
+          ])
+          .png().toBuffer();
+      }
+
+      await sock.sendMessage(jid, { image: finalImageBuffer, caption: `📸 *Cita generada*` }, { quoted: msg });
       await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
 
-      console.log('\n╭─── [CITA COMPLETADA EXITOSAMENTE] ───');
-      console.log(`│ 👤 Usuario: ${userName}`);
-      console.log(`│ 📱 Teléfono: ${phoneNumber}`);
-      console.log(`│ 💬 Texto: "${quoteText.length > 50 ? quoteText.substring(0, 50) + '...' : quoteText}"`);
-      console.log(`│ 📏 Formato: ${isVertical ? 'Vertical' : 'Horizontal'} | Color: ${isColor ? 'Sí' : 'No'}`);
-      console.log('╰───────────────────────────────────────\n');
-
     } catch (err) {
-      console.error('Error crítico en addon .cita:', err);
-      await sock.sendMessage(msg.key.remoteJid, { react: { text: '❌', key: msg.key } });
+      console.error(err);
+      await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
     }
   }
 };

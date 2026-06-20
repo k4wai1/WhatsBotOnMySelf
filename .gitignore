@@ -20,6 +20,14 @@ Fx5uEz0WwAAoQm7
 FyQsx7oXsAENZ6W
 FyVNae_X0AUn5DG
 
+# ─── Archivos personales / borradores ───
+ideas.txt
+*.md
+!README.md
+
+# ─── Assets de prueba / multimedia sin origen claro ───
+assets/hopecore/
+
 # ─── Sistema ───
 .DS_Store
 Thumbs.db
