@@ -79,8 +79,8 @@ async function ensureTmpDir() {
 function detectPrefix(msg) {
     const text = msg.message?.conversation ||
                  msg.message?.extendedTextMessage?.text || '';
-    const match = text.match(/^([,!\/])\s*/);
-    return match ? match[1] : '!'; // fallback a '!' si no se puede detectar
+    const match = text.match(/^([,.!\/])\s*/);
+    return match ? match[1] : ','; // fallback visible
 }
 
 /** Limpia un directorio temporal ignorando errores */
