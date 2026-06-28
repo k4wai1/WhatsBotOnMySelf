@@ -675,8 +675,8 @@ module.exports = {
                 return;
             }
 
-            // ─── CASO 3: Nueva descarga (primer paso) ────────────────────
-            const url = cleanArgs[0];
+            // ─── CASO 3: Nueva descarga o búsqueda (primer paso) ─────────
+            const url = cleanArgs.join(' ');
             if (!url) {
                 console.log('📹 ytdl: uso sin args — mostrando ayuda');
                 await sock.sendMessage(jid, {
@@ -703,9 +703,12 @@ module.exports = {
             }
 
             // Si no parece URL de YouTube → tratar como búsqueda
-            const urlLower = url.toLowerCase();
-            const isYoutubeUrl = urlLower.includes('youtube.com') || urlLower.includes('youtu.be') ||
-                                 urlLower.includes('m.youtube.com') || urlLower.includes('youtube-nocookie.com');
+            const urlLower = url.toLowerCase().trim();
+            const startsWithHttp = urlLower.startsWith('http://') || urlLower.startsWith('https://');
+            const isYoutubeUrl = startsWithHttp && (
+                urlLower.includes('youtube.com') || urlLower.includes('youtu.be') ||
+                urlLower.includes('m.youtube.com') || urlLower.includes('youtube-nocookie.com')
+            );
 
             if (!isYoutubeUrl) {
                 console.log(`📹 ytdl: buscando: "${url}"`);
