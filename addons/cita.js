@@ -49,15 +49,6 @@ async function getRandomHopecoreImage() {
   }
 }
 
-function getOptimalFontSize(text, width, height, maxFontSize) {
-  const textLength = text.length || 1;
-  const boxArea = width * height;
-  const targetArea = boxArea * 0.70; 
-  let calculatedSize = Math.floor(Math.sqrt(targetArea / (textLength * 0.55)));
-  return Math.min(calculatedSize, maxFontSize);
-}
-
-// ---------------------- Resolución de usuario Avanzada ----------------------
 async function resolveUser(targetIdRaw, sock, msg, store, chatJid) {
   let targetId = targetIdRaw;
   let pureJid = '';
@@ -65,7 +56,6 @@ async function resolveUser(targetIdRaw, sock, msg, store, chatJid) {
   let phoneNumber = 'desconocido';
 
   if (targetId.includes('@lid')) {
-    // Caso especial: el propio bot
     const botLid = sock.authState?.creds?.me?.lid;
     if (botLid && targetId === botLid) {
       const botId = sock.user?.id || sock.authState?.creds?.me?.id;
@@ -77,7 +67,6 @@ async function resolveUser(targetIdRaw, sock, msg, store, chatJid) {
       }
     }
 
-    // Buscar en metadatos del grupo
     if (chatJid.endsWith('@g.us')) {
       try {
         const metadata = await sock.groupMetadata(chatJid);
@@ -96,7 +85,6 @@ async function resolveUser(targetIdRaw, sock, msg, store, chatJid) {
       } catch (e) { /* silencioso */ }
     }
 
-    // Búsqueda exhaustiva en store.contacts
     if (store?.contacts) {
       let foundContact = null;
       let foundKey = null;
@@ -126,7 +114,6 @@ async function resolveUser(targetIdRaw, sock, msg, store, chatJid) {
       }
     }
 
-    // Si no se pudo resolver, mantener como está
     pureJid = targetId;
     phoneNumber = targetId.split('@')[0];
     userName = 'Usuario Oculto';
@@ -135,7 +122,6 @@ async function resolveUser(targetIdRaw, sock, msg, store, chatJid) {
     phoneNumber = targetId.split('@')[0];
   }
 
-  // Obtener nombre desde store si es posible
   if (pureJid && store?.contacts) {
     const contact = store.contacts[pureJid] || store.contacts[targetId];
     if (contact) {
@@ -154,6 +140,56 @@ async function resolveUser(targetIdRaw, sock, msg, store, chatJid) {
 
   return { pureJid, userName, phoneNumber };
 }
+
+function getOptimalFontSize(text, width, height, maxFontSize) {
+  const textLength = text.length || 1;
+  const boxArea = width * height;
+  const targetArea = boxArea * 0.70; 
+  let calculatedSize = Math.floor(Math.sqrt(targetArea / (textLength * 0.55)));
+  return Math.min(calculatedSize, maxFontSize);
+}
+
+
+// Algoritmo para extraer el código Hexadecimal del emoji (Soporta emojis compuestos y banderas)
+function getTwemojiCode(emoji) {
+  return Array.from(emoji)
+    .map(char => char.codePointAt(0).toString(16))
+    .filter(hex => hex !== 'fe0f') // Twemoji elimina el selector de variación 'fe0f' de sus nombres de archivo
+    .join('-');
+}
+
+// Descargador de Emojis
+const loadEmojiAsset = async (code, segment) => {
+  if (code === 'emoji') {
+    try {
+      // Convertimos el emoji literal (ej. 🏳️‍⚧️) a su código (ej. 1f3f3-200d-26a7)
+      const hexCode = getTwemojiCode(segment);
+      
+      // Ya estamos pidiendo explícitamente el formato PNG a 72x72 (baja resolución, ultra rápido para Sharp)
+      const url = `https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/${hexCode}.png`;
+      
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
+      
+      if (!response.ok) {
+        console.warn(`⚠️ Emoji no encontrado en la CDN: ${segment} (Código buscado: ${hexCode})`);
+        return undefined;
+      }
+      
+      const arrayBuffer = await response.arrayBuffer();
+      const base64 = Buffer.from(arrayBuffer).toString('base64');
+      
+      return `data:image/png;base64,${base64}`;
+    } catch (e) {
+      console.error('❌ Error crítico cargando emoji:', e.message);
+      return undefined;
+    }
+  }
+};
+
 
 // ---------------------- Comando Principal ----------------------
 module.exports = {
@@ -182,13 +218,11 @@ module.exports = {
         else cleanArgs.push(arg);
       }
 
-      // Aleatoriedad si no se especifica orientación
       if (!isVertical && !isHorizontal) {
         isVertical = Math.random() > 0.5;
         isHorizontal = !isVertical;
       }
 
-      // Extracción y limpieza del texto (eliminando saltos de línea)
       let quoteText = cleanArgs.join(' ').replace(/\n/g, ' ').trim();
       const quoteMatch = quoteText.match(/(["'])(.*?)\1/);
       if (quoteMatch) quoteText = quoteMatch[2];
@@ -214,7 +248,6 @@ module.exports = {
 
       const { pureJid, userName, phoneNumber } = await resolveUser(targetId, sock, msg, store, jid);
 
-      // Obtener Avatar
       let imgBuffer = await fetchProfilePictureWithTimeout(sock, pureJid, 6000);
       if (!imgBuffer) {
         imgBuffer = await getRandomHopecoreImage();
@@ -241,7 +274,7 @@ module.exports = {
       let finalImageBuffer;
 
       if (isVertical) {
-        // --- RENDERIZADO VERTICAL (720x960) ---
+        // --- RENDERIZADO VERTICAL ---
         const width = 720;
         const height = 960;
 
@@ -271,7 +304,6 @@ module.exports = {
           props: {
             style: { width: '720px', height: '960px', position: 'relative', fontFamily: 'FiraSans', display: 'flex' },
             children: [
-              // Caja de Cita (Absolute y Centrado Absoluto)
               {
                 type: 'div',
                 props: {
@@ -283,7 +315,6 @@ module.exports = {
                   children: textElements
                 }
               },
-              // Footer: Nombre y Teléfono (Absolute)
               {
                 type: 'div',
                 props: {
@@ -299,7 +330,15 @@ module.exports = {
               }
             ]
           }
-        }, { width, height, fonts: [{ name: 'FiraSans', data: fontNormalBuffer, weight: 400, style: 'normal' }, { name: 'FiraSans', data: fontBoldBuffer, weight: 700, style: 'normal' }], loadAdditionalAsset: async (code, segment) => (code === 'emoji' ? `https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/${segment}.svg` : undefined) });
+        }, { 
+          width, 
+          height, 
+          fonts: [
+            { name: 'FiraSans', data: fontNormalBuffer, weight: 400, style: 'normal' }, 
+            { name: 'FiraSans', data: fontBoldBuffer, weight: 700, style: 'normal' }
+          ],
+          loadAdditionalAsset: loadEmojiAsset
+        });
 
         const textOverlayBuffer = await sharp(Buffer.from(satoriSvg)).png().toBuffer();
 
@@ -308,7 +347,7 @@ module.exports = {
           .png().toBuffer();
 
       } else {
-        // --- RENDERIZADO HORIZONTAL (1280x720) ---
+        // --- RENDERIZADO HORIZONTAL ---
         const width = 1280;
         const height = 720;
 
@@ -343,7 +382,6 @@ module.exports = {
           props: {
             style: { width: '1280px', height: '720px', position: 'relative', fontFamily: 'FiraSans', display: 'flex' },
             children: [
-              // Caja de Cita
               {
                 type: 'div',
                 props: {
@@ -355,7 +393,6 @@ module.exports = {
                   children: textElements
                 }
               },
-              // Footer
               {
                 type: 'div',
                 props: {
@@ -371,10 +408,17 @@ module.exports = {
               }
             ]
           }
-        }, { width, height, fonts: [{ name: 'FiraSans', data: fontNormalBuffer, weight: 400, style: 'normal' }, { name: 'FiraSans', data: fontBoldBuffer, weight: 700, style: 'normal' }], loadAdditionalAsset: async (code, segment) => (code === 'emoji' ? `https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/${segment}.svg` : undefined) });
+        }, { 
+          width, 
+          height, 
+          fonts: [
+            { name: 'FiraSans', data: fontNormalBuffer, weight: 400, style: 'normal' }, 
+            { name: 'FiraSans', data: fontBoldBuffer, weight: 700, style: 'normal' }
+          ],
+          loadAdditionalAsset: loadEmojiAsset
+        });
 
         const textOverlayBuffer = await sharp(Buffer.from(satoriSvg)).png().toBuffer();
-
         const compositedAvatar = await sharp(avatarLayer).composite([{ input: overlaySvg, blend: 'over' }]).png().toBuffer();
 
         finalImageBuffer = await sharp(baseCanvas)

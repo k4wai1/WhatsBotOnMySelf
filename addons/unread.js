@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 const HISTORY_FILE = path.join(__dirname, '..', 'assets', 'chatHistory.json');
-const MAX_HISTORY = 1000;
+const MAX_HISTORY = 5000;
 const SAVE_INTERVAL = 200; // guardar cada 200 mensajes
 
 let chatHistory = new Map();
