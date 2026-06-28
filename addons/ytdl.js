@@ -32,8 +32,10 @@ const WARN_SIZE = 60 * 1024 * 1024; // 60 MB
 const RES_TIERS = [4320, 2160, 1440, 1080, 720, 480, 360, 240, 144];
 
 // ─── Estado de sesiones interactivas ─────────────────────────────────────
-// Map<senderJid -> { info, options, createdAt }>
+// pendingSessions: Map<senderJid -> { info, options, createdAt }>  — menú de formatos
+// pendingSearch:   Map<senderJid -> { results, createdAt }>        — resultados de búsqueda
 const pendingSessions = new Map();
+const pendingSearch = new Map();
 
 const SESSION_TTL_MS = 10 * 60 * 1000; // 10 minutos
 
@@ -42,6 +44,9 @@ setInterval(() => {
     const now = Date.now();
     for (const [jid, session] of pendingSessions) {
         if (now - session.createdAt > SESSION_TTL_MS) pendingSessions.delete(jid);
+    }
+    for (const [jid, session] of pendingSearch) {
+        if (now - session.createdAt > SESSION_TTL_MS) pendingSearch.delete(jid);
     }
 }, 60_000);
 
@@ -302,6 +307,32 @@ async function fetchVideoInfo(url) {
 }
 
 /**
+ * Busca videos en YouTube usando yt-dlp con ytsearch.
+ * Retorna un array de { id, title, url, duration, channel, thumbnail }.
+ */
+async function searchYoutube(query) {
+    const stdout = await ytdlp([
+        `ytsearch5:${query}`,
+        '--dump-json',
+        '--no-warnings',
+        '--flat-playlist',
+        '--no-playlist',
+    ]);
+    const lines = stdout.trim().split('\n');
+    return lines.map(line => {
+        const d = JSON.parse(line);
+        return {
+            id: d.id,
+            title: d.title || 'Sin título',
+            url: d.url || d.webpage_url || `https://youtu.be/${d.id}`,
+            duration: d.duration || 0,
+            channel: d.channel || d.uploader || 'Desconocido',
+            thumbnail: d.thumbnail || ''
+        };
+    });
+}
+
+/**
  * Agrupa formatos por altura, eligiendo el mejor de cada grupo.
  * Devuelve un array de { height, label, formatSpec, sizeBytes } ordenado descendente.
  * Al final añade la opción "Solo audio".
@@ -427,6 +458,48 @@ function buildMenuText(info, options) {
     return lines.join('\n');
 }
 
+// ─── Menú de resultados de búsqueda ────────────────────────────────────
+
+function buildSearchMenu(results) {
+    const lines = [];
+    lines.push('🔍 *Resultados de búsqueda:*');
+    lines.push('');
+
+    results.forEach((r, i) => {
+        const num = i + 1;
+        const dur = r.duration ? `⏱ ${fmtDuration(r.duration)}` : '';
+        lines.push(`${num}. *${r.title}*`);
+        lines.push(`   📺 ${r.channel}  ${dur}`);
+    });
+
+    lines.push('');
+    lines.push('Responde con:  `.ytdl <núm>`  (ej: `.ytdl 2`)');
+    lines.push('`.ytdl cancel` para salir');
+    lines.push('_(Búsqueda expira en 10 min)_');
+
+    return lines.join('\n');
+}
+
+// ─── Enviar menú con miniatura (si está disponible) ─────────────────────
+
+async function sendMenuWithThumbnail(sock, jid, menuText, thumbnailUrl, quotedMsg) {
+    if (thumbnailUrl) {
+        try {
+            const axios = require('axios');
+            const resp = await axios.get(thumbnailUrl, { responseType: 'arraybuffer', timeout: 8000 });
+            const thumbBuffer = Buffer.from(resp.data);
+            await sock.sendMessage(jid, {
+                image: thumbBuffer,
+                caption: menuText
+            }, { quoted: quotedMsg });
+            return;
+        } catch (_) {
+            // Fallback: enviar solo texto si falla la miniatura
+        }
+    }
+    await sock.sendMessage(jid, { text: menuText }, { quoted: quotedMsg });
+}
+
 // ─── Handler principal ───────────────────────────────────────────────────
 
 module.exports = {
@@ -448,10 +521,10 @@ module.exports = {
         try {
             // ─── CASO 1: Cancelar sesión ────────────────────────────────
             if (cleanArgs[0]?.toLowerCase() === 'cancel') {
-                if (pendingSessions.has(sender)) {
-                    pendingSessions.delete(sender);
+                const hadSession = pendingSessions.delete(sender) | pendingSearch.delete(sender);
+                if (hadSession) {
                     console.log(`📹 ytdl: sesión cancelada por ${pushName}`);
-                    await sock.sendMessage(jid, { text: '✅ Descarga cancelada.' }, { quoted: msg });
+                    await sock.sendMessage(jid, { text: '✅ Descarga/Búsqueda cancelada.' }, { quoted: msg });
                 } else {
                     await sock.sendMessage(jid, { text: '❌ No tienes ninguna descarga activa.' }, { quoted: msg });
                 }
@@ -562,6 +635,46 @@ module.exports = {
                 return;
             }
 
+            // ─── CASO 2b: Selección de resultado de búsqueda ─────────────
+            if (!isNaN(selection) && pendingSearch.has(sender)) {
+                const searchData = pendingSearch.get(sender);
+                const { results } = searchData;
+
+                if (selection < 1 || selection > results.length) {
+                    console.log(`📹 ytdl: selección búsqueda inválida ${selection} (rango: 1-${results.length})`);
+                    await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
+                    await sock.sendMessage(jid, {
+                        text: '❌ Número inválido. Elige entre 1 y ' + results.length + '.\nUsa `.ytdl cancel` para salir.'
+                    }, { quoted: msg });
+                    return;
+                }
+
+                const selectedResult = results[selection - 1];
+                pendingSearch.delete(sender);
+
+                console.log(`📹 ytdl: ${pushName} seleccionó búsqueda #${selection} → "${selectedResult.title}"`);
+                await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
+
+                // Obtener info del video seleccionado
+                const info = await fetchVideoInfo(selectedResult.url);
+                const options = buildFormatOptions(info);
+
+                if (options.length === 0) {
+                    await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+                    await sock.sendMessage(jid, {
+                        text: '❌ No se encontraron formatos descargables para este video.'
+                    }, { quoted: msg });
+                    return;
+                }
+
+                pendingSessions.set(sender, { info, options, createdAt: Date.now() });
+                const menuText = buildMenuText(info, options);
+                await sendMenuWithThumbnail(sock, jid, menuText, info.thumbnail, msg);
+                await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
+                console.log(`📹 ytdl: menú enviado a ${pushName} — esperando selección`);
+                return;
+            }
+
             // ─── CASO 3: Nueva descarga (primer paso) ────────────────────
             const url = cleanArgs[0];
             if (!url) {
@@ -576,26 +689,49 @@ module.exports = {
                         '  `!ytdl cancel` — Cancela la descarga actual',
                         '  `!ytdl c <url>` — Descarga + comprime en ZIP',
                         '  `!ytdl <núm> c` — Selección + comprime en ZIP',
+                        '  `!ytdl <query>` — Buscar videos en YouTube',
                         '',
                         'Ejemplos:',
                         '  `!ytdl https://youtube.com/watch?v=xxx`',
                         '  `!ytdl 3`  (selecciona la opción 3)',
                         '  `!ytdl c https://youtu.be/xxx`  (comprimido)',
+                        '  `!ytdl curso de python`  (búsqueda)',
                     ].join('\n')
                 }, { quoted: msg });
                 await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
                 return;
             }
 
-            // Validar que parezca una URL de YouTube
+            // Si no parece URL de YouTube → tratar como búsqueda
             const urlLower = url.toLowerCase();
-            if (!urlLower.includes('youtube.com') && !urlLower.includes('youtu.be') &&
-                !urlLower.includes('m.youtube.com') && !urlLower.includes('youtube-nocookie.com')) {
-                console.log(`📹 ytdl: URL inválida: ${url}`);
-                await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
-                await sock.sendMessage(jid, {
-                    text: '❌ Eso no parece un enlace de YouTube válido.\nAsegúrate de incluir el `https://`.'
-                }, { quoted: msg });
+            const isYoutubeUrl = urlLower.includes('youtube.com') || urlLower.includes('youtu.be') ||
+                                 urlLower.includes('m.youtube.com') || urlLower.includes('youtube-nocookie.com');
+
+            if (!isYoutubeUrl) {
+                console.log(`📹 ytdl: buscando: "${url}"`);
+                await sock.sendMessage(jid, { react: { text: '🔍', key: msg.key } });
+
+                try {
+                    const results = await searchYoutube(url);
+                    if (results.length === 0) {
+                        await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+                        await sock.sendMessage(jid, {
+                            text: '❌ No se encontraron resultados para esa búsqueda.'
+                        }, { quoted: msg });
+                        return;
+                    }
+                    pendingSearch.set(sender, { results, createdAt: Date.now() });
+                    const searchText = buildSearchMenu(results);
+                    await sock.sendMessage(jid, { text: searchText }, { quoted: msg });
+                    await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
+                    console.log(`📹 ytdl: ${results.length} resultados mostrados a ${pushName}`);
+                } catch (searchErr) {
+                    console.error('❌ ytdl: error en búsqueda:', searchErr.message);
+                    await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+                    await sock.sendMessage(jid, {
+                        text: `❌ Error en la búsqueda: ${searchErr.message.slice(0, 200)}`
+                    }, { quoted: msg });
+                }
                 return;
             }
 
@@ -637,15 +773,18 @@ module.exports = {
 
             // Enviar menú de selección
             const menuText = buildMenuText(info, options);
-            await sock.sendMessage(jid, { text: menuText }, { quoted: msg });
+            await sendMenuWithThumbnail(sock, jid, menuText, info.thumbnail, msg);
             await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
             console.log(`📹 ytdl: menú enviado a ${pushName} — esperando selección`);
 
         } catch (err) {
             console.error('❌ ytdl: ERROR GENERAL:', err.message);
 
-            // Limpiar sesión si existe
-            if (sender) pendingSessions.delete(sender);
+            // Limpiar sesiones si existen
+            if (sender) {
+                pendingSessions.delete(sender);
+                pendingSearch.delete(sender);
+            }
             if (COOKIES_TEMP_FILE) cleanupCookiesTemp();
 
             await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
