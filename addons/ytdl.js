@@ -72,6 +72,17 @@ async function ensureTmpDir() {
     return dir;
 }
 
+/**
+ * Extrae el prefijo real usado en el mensaje original.
+ * Examina el texto del mensaje para detectar con qué prefijo (,, !, /) fue invocado.
+ */
+function detectPrefix(msg) {
+    const text = msg.message?.conversation ||
+                 msg.message?.extendedTextMessage?.text || '';
+    const match = text.match(/^([,!\/])\s*/);
+    return match ? match[1] : '!'; // fallback a '!' si no se puede detectar
+}
+
 /** Limpia un directorio temporal ignorando errores */
 async function cleanupDir(dir) {
     if (dir) await fs.remove(dir).catch(() => {});
@@ -220,7 +231,7 @@ async function downloadMedia(url, formatSpec, outputDir) {
 
 // ─── Interfaz de texto para el menú de formatos ─────────────────────────
 
-function buildMenuText(info, options) {
+function buildMenuText(info, options, prefix) {
     const lines = [];
     lines.push('╭━━━━━━━━━━━━━━━━━━━━');
     lines.push(`┃ 📹 *${info.title}*`);
@@ -243,9 +254,9 @@ function buildMenuText(info, options) {
     });
 
     lines.push('');
-    lines.push('Responde con:  `.ytdl <núm>`');
-    lines.push('Ejemplo: `.ytdl 3`  (para 1080p)');
-    lines.push('`.ytdl cancel` para salir');
+    lines.push(`Responde con:  ${prefix}ytdl <núm>`);
+    lines.push(`Ejemplo: ${prefix}ytdl 3  (para 1080p)`);
+    lines.push(`${prefix}ytdl cancel para salir`);
 
     return lines.join('\n');
 }
@@ -253,19 +264,23 @@ function buildMenuText(info, options) {
 // ─── Handler principal ───────────────────────────────────────────────────
 
 module.exports = {
-    commands: ['ytdl', 'yt', 'youtube'],
+    commands: ['ytdl', 'ytdlp', 'yt', 'youtube'],
 
     handler: async (sock, msg, args, store) => {
         const jid = msg.key.remoteJid;
         // En grupos el sender es el participant; en privado es el remoteJid
         const sender = msg.key.participant || jid;
         const pushName = msg.pushName || 'Usuario';
+        const prefix = detectPrefix(msg);
+
+        console.log(`📹 ytdl — llamado por ${pushName} (${sender}) args: [${args.join(', ')}]`);
 
         try {
             // ─── CASO 1: Cancelar sesión ────────────────────────────────
             if (args[0]?.toLowerCase() === 'cancel') {
                 if (pendingSessions.has(sender)) {
                     pendingSessions.delete(sender);
+                    console.log(`🚫 ytdl — ${pushName} canceló la descarga`);
                     await sock.sendMessage(jid, { text: '✅ Descarga cancelada.' }, { quoted: msg });
                 } else {
                     await sock.sendMessage(jid, { text: '❌ No tienes ninguna descarga activa.' }, { quoted: msg });
@@ -282,13 +297,14 @@ module.exports = {
                 if (selection < 1 || selection > options.length) {
                     await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
                     await sock.sendMessage(jid, {
-                        text: `❌ Número inválido. Elige entre 1 y ${options.length}.\nUsa \`.ytdl cancel\` para salir.`
+                        text: `❌ Número inválido. Elige entre 1 y ${options.length}.\nUsa "${prefix}ytdl cancel" para salir.`
                     }, { quoted: msg });
                     return;
                 }
 
                 const selected = options[selection - 1];
                 pendingSessions.delete(sender); // Consumir la sesión
+                console.log(`📥 ytdl — ${pushName} seleccionó opción ${selection}: ${selected.label} — ${info.title}`);
 
                 await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
 
@@ -341,6 +357,7 @@ module.exports = {
                         }, { quoted: msg });
                     }
 
+                    console.log(`✅ ytdl — ${pushName}: video enviado (${selected.label}, ${fmtSize(fileSize)}) — ${info.title}`);
                     await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
                 } catch (dlErr) {
                     console.error('Error en descarga ytdl:', dlErr);
@@ -362,13 +379,13 @@ module.exports = {
                         '📹 *YouTube Downloader*',
                         '',
                         'Uso:',
-                        '  `.ytdl <url>` — Lista resoluciones disponibles',
-                        '  `.ytdl <núm>` — Descarga la opción seleccionada',
-                        '  `.ytdl cancel` — Cancela la descarga actual',
+                        `  ${prefix}ytdl <url> — Lista resoluciones disponibles`,
+                        `  ${prefix}ytdl <núm> — Descarga la opción seleccionada`,
+                        `  ${prefix}ytdl cancel — Cancela la descarga actual`,
                         '',
                         'Ejemplos:',
-                        '  `.ytdl https://youtube.com/watch?v=xxx`',
-                        '  `.ytdl 3`  (selecciona la opción 3)',
+                        `  ${prefix}ytdl https://youtube.com/watch?v=xxx`,
+                        `  ${prefix}ytdl 3  (selecciona la opción 3)`,
                     ].join('\n')
                 }, { quoted: msg });
                 await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
@@ -415,8 +432,9 @@ module.exports = {
                 createdAt: Date.now()
             });
 
+            console.log(`📋 ytdl — ${pushName}: menú enviado con ${options.length} opciones para: ${info.title}`);
             // Enviar menú de selección
-            const menuText = buildMenuText(info, options);
+            const menuText = buildMenuText(info, options, prefix);
             await sock.sendMessage(jid, { text: menuText }, { quoted: msg });
             await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
 
