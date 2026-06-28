@@ -421,6 +421,7 @@ function buildMenuText(info, options) {
 
     lines.push('');
     lines.push('Responde con:  `.ytdl <núm>`  (ej: `.ytdl 3`)');
+    lines.push('Agrega `c` al final para comprimir en ZIP: `.ytdl 3 c`');
     lines.push('`.ytdl cancel` para salir');
 
     return lines.join('\n');
@@ -437,12 +438,16 @@ module.exports = {
         const sender = msg.key.participant || jid;
         const pushName = msg.pushName || 'Usuario';
 
+        // Extraer flag de compresión 'c' / 'zip' / 'comp' de los args
+        const compressFlag = args.some(a => a === 'c' || a === 'zip' || a === 'comp');
+        const cleanArgs = args.filter(a => a !== 'c' && a !== 'zip' && a !== 'comp');
+
         // Log de depuración: mostrar quién llamó y con qué args
-        console.log(`📹 ytdl — llamado por ${pushName} (${sender}) args:`, JSON.stringify(args));
+        console.log(`📹 ytdl — llamado por ${pushName} (${sender}) args:`, JSON.stringify(args), compressFlag ? '[COMPRIMIR]' : '');
 
         try {
             // ─── CASO 1: Cancelar sesión ────────────────────────────────
-            if (args[0]?.toLowerCase() === 'cancel') {
+            if (cleanArgs[0]?.toLowerCase() === 'cancel') {
                 if (pendingSessions.has(sender)) {
                     pendingSessions.delete(sender);
                     console.log(`📹 ytdl: sesión cancelada por ${pushName}`);
@@ -454,7 +459,7 @@ module.exports = {
             }
 
             // ─── CASO 2: Selección numérica (sesión activa) ──────────────
-            const selection = parseInt(args[0], 10);
+            const selection = parseInt(cleanArgs[0], 10);
             if (!isNaN(selection) && pendingSessions.has(sender)) {
                 const session = pendingSessions.get(sender);
                 const { info, options } = session;
@@ -486,11 +491,32 @@ module.exports = {
                     const fileSize = stat.size;
                     console.log(`📹 ytdl: descarga completada → ${path.basename(downloadedPath)} (${fmtSize(fileSize)})`);
 
-                    const fileBuffer = await fs.readFile(downloadedPath);
-                    const ext = path.extname(downloadedPath).toLowerCase();
+                    let sendPath = downloadedPath;
+                    let isCompressed = false;
+
+                    // ── Si el usuario pidió compresión ZIP ──
+                    if (compressFlag) {
+                        console.log(`📹 ytdl: comprimiendo en ZIP (máxima compresión)...`);
+                        const zipPath = downloadedPath + '.zip';
+                        await execFileP('zip', ['-9', '-j', zipPath, downloadedPath]);
+                        const zipStat = await fs.stat(zipPath);
+                        console.log(`📹 ytdl: ZIP creado → ${fmtSize(zipStat.size)} (original: ${fmtSize(fileSize)})`);
+                        sendPath = zipPath;
+                        isCompressed = true;
+                    }
+
+                    const fileBuffer = await fs.readFile(sendPath);
+                    const ext = path.extname(sendPath).toLowerCase();
 
                     // ── Enviar según tipo ──
-                    if (selected.isAudio) {
+                    if (isCompressed) {
+                        // ZIP → siempre como documento
+                        await sock.sendMessage(jid, {
+                            document: fileBuffer,
+                            mimetype: 'application/zip',
+                            fileName: `video_${info.id}.zip`
+                        }, { quoted: msg });
+                    } else if (selected.isAudio) {
                         await sock.sendMessage(jid, {
                             audio: fileBuffer,
                             mimetype: 'audio/mpeg',
@@ -499,22 +525,26 @@ module.exports = {
                     } else if (ext === '.mp4' || ext === '.webm' || ext === '.mkv') {
                         const actualExt = ext === '.mkv' || ext === '.webm' ? '.mp4' : ext;
 
+                        // Si el archivo es muy grande para video → enviar como documento
                         if (fileSize > WARN_SIZE) {
+                            console.log(`📹 ytdl: archivo grande (${fmtSize(fileSize)}), enviando como documento`);
                             await sock.sendMessage(jid, {
-                                text: `⚠️ El archivo pesa ${fmtSize(fileSize)}. WhatsApp puede rechazar archivos >64 MB.`
+                                document: fileBuffer,
+                                mimetype: `video/${actualExt.replace('.', '')}`,
+                                fileName: `video_${info.id}.${actualExt.replace('.', '')}`
+                            }, { quoted: msg });
+                        } else {
+                            await sock.sendMessage(jid, {
+                                video: fileBuffer,
+                                caption: `📹 ${info.title}`,
+                                mimetype: `video/${actualExt.replace('.', '')}`
                             }, { quoted: msg });
                         }
-
-                        await sock.sendMessage(jid, {
-                            video: fileBuffer,
-                            caption: `📹 ${info.title}`,
-                            mimetype: `video/${actualExt.replace('.', '')}`
-                        }, { quoted: msg });
                     } else {
                         await sock.sendMessage(jid, {
                             document: fileBuffer,
                             mimetype: 'application/octet-stream',
-                            fileName: path.basename(downloadedPath)
+                            fileName: path.basename(sendPath)
                         }, { quoted: msg });
                     }
 
@@ -533,7 +563,7 @@ module.exports = {
             }
 
             // ─── CASO 3: Nueva descarga (primer paso) ────────────────────
-            const url = args[0];
+            const url = cleanArgs[0];
             if (!url) {
                 console.log('📹 ytdl: uso sin args — mostrando ayuda');
                 await sock.sendMessage(jid, {
@@ -544,10 +574,13 @@ module.exports = {
                         '  `!ytdl <url>` — Lista resoluciones disponibles',
                         '  `!ytdl <núm>` — Descarga la opción seleccionada',
                         '  `!ytdl cancel` — Cancela la descarga actual',
+                        '  `!ytdl c <url>` — Descarga + comprime en ZIP',
+                        '  `!ytdl <núm> c` — Selección + comprime en ZIP',
                         '',
                         'Ejemplos:',
                         '  `!ytdl https://youtube.com/watch?v=xxx`',
                         '  `!ytdl 3`  (selecciona la opción 3)',
+                        '  `!ytdl c https://youtu.be/xxx`  (comprimido)',
                     ].join('\n')
                 }, { quoted: msg });
                 await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
