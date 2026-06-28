@@ -323,10 +323,10 @@ function buildFormatOptions(info) {
         );
         if (candidates.length === 0) continue;
 
-        const best = candidates.reduce((a, b) => {
-            const aScore = (a.acodec && a.acodec !== 'none' ? 1000 : 0) + (a.tbr || 0);
-            const bScore = (b.acodec && b.acodec !== 'none' ? 1000 : 0) + (b.tbr || 0);
-            return bScore - aScore;
+        const best = candidates.reduce((best, current) => {
+            const bestScore = (best.acodec && best.acodec !== 'none' ? 1000 : 0) + (best.tbr || 0);
+            const curScore = (current.acodec && current.acodec !== 'none' ? 1000 : 0) + (current.tbr || 0);
+            return curScore > bestScore ? current : best;
         });
         usedTiers.add(best.height);
 
