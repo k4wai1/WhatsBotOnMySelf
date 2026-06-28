@@ -200,14 +200,49 @@ async function cleanupDir(dir) {
  *   - --cookies si el archivo existe
  * Lanza un error descriptivo si falla.
  */
+
+// ─── Detección de Deno ────────────────────────────────────────────────
+// PM2 a veces no hereda el PATH del shell, así que probamos múltiples estrategias.
 let DENO_PATH = null;
-try {
+
+function findDeno() {
     const { execFileSync } = require('child_process');
-    DENO_PATH = execFileSync('which', ['deno'], { encoding: 'utf-8', timeout: 5000 }).trim();
-    console.log(`🦕 ytdl: Deno detectado en ${DENO_PATH}`);
+    const candidates = [
+        // 1. which deno (funciona si PATH incluye ~/.deno/bin)
+        () => execFileSync('which', ['deno'], { encoding: 'utf-8', timeout: 5000 }).trim(),
+        // 2. Ruta común de instalación por script oficial
+        () => execFileSync('test', ['-x', `${require('os').homedir()}/.deno/bin/deno`], { encoding: 'utf-8' })
+            && `${require('os').homedir()}/.deno/bin/deno`,
+        // 3. Buscar en /home/*/.deno/bin/deno
+        () => {
+            const homes = execFileSync('ls', ['-d', '/home/*/.deno/bin/deno'], { encoding: 'utf-8', shell: true }).trim().split('\n');
+            return homes.find(f => f.length > 0) || null;
+        },
+        // 4. Deno en /usr/local/bin
+        () => execFileSync('test', ['-x', '/usr/local/bin/deno'], { encoding: 'utf-8' }) && '/usr/local/bin/deno',
+    ];
+
+    for (const attempt of candidates) {
+        try {
+            const result = attempt();
+            if (result && result.length > 0 && result !== true) {
+                return result;
+            }
+        } catch (_) {}
+    }
+    return null;
+}
+
+try {
+    DENO_PATH = findDeno();
+    if (DENO_PATH) {
+        console.log(`🦕 ytdl: Deno detectado en ${DENO_PATH}`);
+    } else {
+        console.warn('⚠️ ytdl: Deno no encontrado. YouTube puede no devolver formatos de video.');
+        console.warn('   Instalá Deno con: curl -fsSL https://deno.land/install.sh | sh');
+        console.warn('   Si ya lo instalaste, reiniciá PM2 con: pm2 restart index');
+    }
 } catch (_) {
-    console.warn('⚠️ ytdl: Deno no instalado. YouTube puede no devolver formatos de video.');
-    console.warn('   Instalá Deno con: curl -fsSL https://deno.land/install.sh | sh');
     DENO_PATH = null;
 }
 
@@ -596,7 +631,7 @@ module.exports = {
             } else if (errMsg.includes('n challenge solving failed') || errMsg.includes('Requested format is not available')) {
                 const denoHint = DENO_PATH
                     ? '⚠️ El n-challenge de YouTube falló incluso con Deno.'
-                    : '❌ YouTube requiere Deno para resolver el n-challenge.\n   Instalá Deno en el servidor:\n   curl -fsSL https://deno.land/install.sh | sh\n   y reiniciá el bot con !restart';
+                    : '❌ YouTube requiere Deno para resolver el n-challenge.\n   Instalá Deno en el servidor:\n   curl -fsSL https://deno.land/install.sh | sh\n   Después reiniciá PM2: pm2 restart index\n   O usá !restart en WhatsApp si el bot está vivo.';
                 await sock.sendMessage(jid, {
                     text: `❌ YouTube bloqueó la descarga.\n${denoHint}`
                 }, { quoted: msg });
