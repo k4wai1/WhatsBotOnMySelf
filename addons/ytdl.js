@@ -194,19 +194,23 @@ async function cleanupDir(dir) {
 
 /**
  * Ejecuta yt-dlp y devuelve stdout.
+ * Incluye automáticamente --js-runtimes con el Node.js que ejecuta el bot
+ * (necesario porque YouTube ya no extrae formatos sin JS runtime).
  * Lanza un error descriptivo si falla.
  */
+const JS_RUNTIME_ARG = `node:${process.execPath}`;
+
 async function ytdlp(args) {
     // Preparar argumento de cookies
     const cookiesFile = prepareCookies();
     const allArgs = cookiesFile
-        ? ['--cookies', cookiesFile, ...args]
-        : [...args];
+        ? ['--cookies', cookiesFile, '--js-runtimes', JS_RUNTIME_ARG, ...args]
+        : ['--js-runtimes', JS_RUNTIME_ARG, ...args];
 
     try {
         const { stdout } = await execFileP('yt-dlp', allArgs, {
-            timeout: 180_000,
-            maxBuffer: 20 * 1024 * 1024
+            timeout: 300_000,       // 5 min para descargas grandes
+            maxBuffer: 50 * 1024 * 1024
         });
         return stdout;
     } catch (err) {
