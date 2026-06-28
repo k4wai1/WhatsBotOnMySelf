@@ -18,6 +18,10 @@ assets/chatHistory.json
 # ─── Archivos de entorno con credenciales reales ───
 .env
 
+# ─── Cookies de YouTube para yt-dlp (contienen tokens de sesión) ───
+www.youtube.com_cookies.json
+assets/www.youtube.com_cookies.json
+
 # ─── Archivos binarios / multimedia sin origen claro ───
 Fx5uEz0WwAAoQm7
 FyQsx7oXsAENZ6W
