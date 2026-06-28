@@ -20,7 +20,9 @@ assets/chatHistory.json
 
 # ─── Cookies de YouTube para yt-dlp (contienen tokens de sesión) ───
 www.youtube.com_cookies.json
+www.youtube.com_cookies.txt
 assets/www.youtube.com_cookies.json
+assets/www.youtube.com_cookies.txt
 
 # ─── Archivos binarios / multimedia sin origen claro ───
 Fx5uEz0WwAAoQm7

@@ -1,6 +1,8 @@
 // addons/ytdl.js — YouTube Downloader interactivo
 // Dependencia externa: yt-dlp (instalado en el sistema)
-// Cookies: assets/www.youtube.com_cookies.json (exportadas con extensión cookies_localy.txt)
+// Cookies: busca en assets/www.youtube.com_cookies.json o www.youtube.com_cookies.json
+//           Acepta formato JSON (arreglo de cookies) o Netscape (formato texto)
+//           Si es JSON, lo convierte automáticamente a Netscape para yt-dlp
 // ────────────────────────────────────────────────────────────────────────────
 
 const { execFile } = require('child_process');
@@ -13,7 +15,14 @@ const execFileP = util.promisify(execFile);
 
 // ─── Constantes ──────────────────────────────────────────────────────────
 
-const COOKIES_PATH = path.join(__dirname, '..', 'assets', 'www.youtube.com_cookies.json');
+// Busca el archivo de cookies en varias rutas (assets/ primero, luego raíz)
+const COOKIES_CANDIDATES = [
+    path.join(__dirname, '..', 'assets', 'www.youtube.com_cookies.json'),
+    path.join(__dirname, '..', 'www.youtube.com_cookies.json'),
+    path.join(__dirname, '..', 'assets', 'www.youtube.com_cookies.txt'),
+    path.join(__dirname, '..', 'www.youtube.com_cookies.txt'),
+];
+
 const TMP_BASE = '/tmp/ytdl';
 
 // Umbral de tamaño: si el archivo estimado supera esto, se advierte (en bytes)
@@ -23,7 +32,7 @@ const WARN_SIZE = 60 * 1024 * 1024; // 60 MB
 const RES_TIERS = [4320, 2160, 1440, 1080, 720, 480, 360, 240, 144];
 
 // ─── Estado de sesiones interactivas ─────────────────────────────────────
-// Map<senderJid -> { url, title, duration, channel, thumb, formats, estimatedSizes, createdAt }>
+// Map<senderJid -> { info, options, createdAt }>
 const pendingSessions = new Map();
 
 const SESSION_TTL_MS = 10 * 60 * 1000; // 10 minutos
@@ -36,12 +45,123 @@ setInterval(() => {
     }
 }, 60_000);
 
-// ─── Helpers ─────────────────────────────────────────────────────────────
+// ─── Conversor de cookies: JSON_array → Netscape ────────────────────────
+// La extensión "cookies_localy.txt" exporta cookies en JSON con estructura:
+//   [{ domain, name, value, path, secure, httpOnly, expirationDate, ... }]
+// yt-dlp exige formato Netscape:
+//   domain\tTRUE\tpath\tsecure\texpiry\tname\tvalue
+// Esta función convierte sobre la marcha y escribe un archivo temporal.
 
-/** Devuelve el argumento de cookies si el archivo existe */
-function cookiesArg() {
-    return fs.existsSync(COOKIES_PATH) ? ['--cookies', COOKIES_PATH] : [];
+let COOKIES_TEMP_FILE = null; // Para limpiar al final
+
+/**
+ * Prepara el archivo de cookies para yt-dlp.
+ * Si el archivo es JSON, lo convierte a Netscape en un temp file.
+ * Retorna la ruta al archivo listo para usar, o null si no hay cookies.
+ */
+function prepareCookies() {
+    // Encontrar el primer archivo de cookies que exista
+    const srcPath = COOKIES_CANDIDATES.find(f => fs.existsSync(f));
+    if (!srcPath) return null;
+
+    const raw = fs.readFileSync(srcPath, 'utf-8').trim();
+    if (!raw) return null;
+
+    const ext = path.extname(srcPath).toLowerCase();
+
+    // ── Si termina en .txt, asumimos Netscape y lo usamos directo ──
+    if (ext === '.txt') {
+        console.log(`📝 ytdl: usando cookies Netscape desde ${srcPath}`);
+        return srcPath;
+    }
+
+    // ── Si es JSON, detectar y convertir ──
+    if (raw.startsWith('[')) {
+        try {
+            const cookies = JSON.parse(raw);
+            if (!Array.isArray(cookies) || cookies.length === 0) {
+                console.warn('⚠️ ytdl: archivo JSON de cookies vacío o inválido');
+                return null;
+            }
+
+            // Generar contenido Netscape
+            const lines = [
+                '# Netscape HTTP Cookie File',
+                '# Generado automáticamente desde JSON por ytdl.js',
+                '',
+            ];
+
+            for (const c of cookies) {
+                const domain = c.domain || '';
+                if (!domain) continue;
+
+                // domain_flag: TRUE si el dominio empieza con "."
+                const domainFlag = domain.startsWith('.') ? 'TRUE' : 'FALSE';
+
+                const cPath = c.path || '/';
+
+                // secure_flag: TRUE si secure es true
+                const secureFlag = c.secure ? 'TRUE' : 'FALSE';
+
+                // expiration: usar expirationDate o timestamp de 10 años
+                let expiry = c.expirationDate;
+                if (!expiry || typeof expiry !== 'number') {
+                    expiry = Math.floor(Date.now() / 1000) + 10 * 365 * 86400;
+                } else {
+                    expiry = Math.floor(expiry);
+                }
+
+                const name = c.name || '';
+                const value = c.value || '';
+
+                // Saltar cookies con nombre vacío
+                if (!name) continue;
+
+                // Escapar tabs y newlines en value (Netscape no los tolera)
+                const safeValue = String(value).replace(/[\t\n\r]/g, '');
+
+                lines.push(`${domain}\t${domainFlag}\t${cPath}\t${secureFlag}\t${expiry}\t${name}\t${safeValue}`);
+            }
+
+            if (lines.length <= 3) {
+                console.warn('⚠️ ytdl: no se pudieron convertir cookies (sin entradas válidas)');
+                return null;
+            }
+
+            // Escribir archivo temporal
+            const tmpDir = path.join(TMP_BASE, 'cookies');
+            fs.ensureDirSync(tmpDir);
+            COOKIES_TEMP_FILE = path.join(tmpDir, `cookies_${Date.now()}.txt`);
+            fs.writeFileSync(COOKIES_TEMP_FILE, lines.join('\n') + '\n');
+            console.log(`📝 ytdl: cookies convertidas JSON→Netscape (${cookies.length} entradas → ${lines.length - 3} líneas)`);
+            return COOKIES_TEMP_FILE;
+
+        } catch (parseErr) {
+            console.error('❌ ytdl: error parseando JSON de cookies:', parseErr.message);
+            return null;
+        }
+    }
+
+    // ── Si empieza con #, asumimos que ya es Netscape ──
+    if (raw.startsWith('#')) {
+        console.log(`📝 ytdl: usando cookies Netscape desde ${srcPath}`);
+        return srcPath;
+    }
+
+    // ── Formato desconocido, intentar pasar directo y que yt-dlp decida ──
+    console.warn(`⚠️ ytdl: formato de cookies no reconocido en ${srcPath}, pasando directo`);
+    return srcPath;
 }
+
+/** Limpia el archivo temporal de cookies si existe */
+function cleanupCookiesTemp() {
+    if (COOKIES_TEMP_FILE) {
+        try { fs.unlinkSync(COOKIES_TEMP_FILE); } catch (_) {}
+        COOKIES_TEMP_FILE = null;
+    }
+}
+
+// ─── Helpers generales ───────────────────────────────────────────────────
 
 /** Convierte segundos a formato mm:ss o hh:mm:ss */
 function fmtDuration(secs) {
@@ -60,27 +180,11 @@ function fmtSize(bytes) {
     return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
 }
 
-/** Escapa caracteres problemáticos para nombre de archivo */
-function safeFilename(str) {
-    return String(str).replace(/[<>:"/\\|?*]/g, '_').slice(0, 120);
-}
-
 /** Crea un directorio temporal único */
 async function ensureTmpDir() {
     const dir = path.join(TMP_BASE, crypto.randomBytes(4).toString('hex'));
     await fs.ensureDir(dir);
     return dir;
-}
-
-/**
- * Extrae el prefijo real usado en el mensaje original.
- * Examina el texto del mensaje para detectar con qué prefijo (,, !, /) fue invocado.
- */
-function detectPrefix(msg) {
-    const text = msg.message?.conversation ||
-                 msg.message?.extendedTextMessage?.text || '';
-    const match = text.match(/^([,.!\/])\s*/);
-    return match ? match[1] : ','; // fallback visible
 }
 
 /** Limpia un directorio temporal ignorando errores */
@@ -93,27 +197,35 @@ async function cleanupDir(dir) {
  * Lanza un error descriptivo si falla.
  */
 async function ytdlp(args) {
-    const allArgs = [...args, ...cookiesArg()];
+    // Preparar argumento de cookies
+    const cookiesFile = prepareCookies();
+    const allArgs = cookiesFile
+        ? ['--cookies', cookiesFile, ...args]
+        : [...args];
+
     try {
-        const { stdout } = await execFileP('yt-dlp', allArgs, { timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
+        const { stdout } = await execFileP('yt-dlp', allArgs, {
+            timeout: 180_000,
+            maxBuffer: 20 * 1024 * 1024
+        });
         return stdout;
     } catch (err) {
-        // Extraer mensaje de error de yt-dlp si es posible
         const stderr = err.stderr || '';
         const msg = stderr.split('\n').find(l => l.includes('ERROR:')) || err.message;
-        throw new Error(msg.slice(0, 300));
+        throw new Error(msg.slice(0, 400));
+    } finally {
+        cleanupCookiesTemp();
     }
 }
 
 /**
  * Obtiene el info JSON de un video de YouTube.
- * Retorna { id, title, duration, channel, thumbnail, formats, webpage_url }.
  */
 async function fetchVideoInfo(url) {
     const stdout = await ytdlp([
         '--dump-json',
         '--no-warnings',
-        '--no-playlist',      // Evita listas de reproducción
+        '--no-playlist',
         url
     ]);
     const data = JSON.parse(stdout);
@@ -146,22 +258,19 @@ function buildFormatOptions(info) {
     const results = [];
 
     for (const tier of RES_TIERS) {
-        // Buscar formatos en este tier (con tolerancia de 50px hacia abajo)
         const candidates = videoFormats.filter(f =>
             f.height <= tier && f.height > tier - 80 && !usedTiers.has(f.height)
         );
         if (candidates.length === 0) continue;
 
-        // Marcar esta altura como usada
         const best = candidates.reduce((a, b) => {
-            // Preferir formatos con audio incluido, luego mayor bitrate
             const aScore = (a.acodec && a.acodec !== 'none' ? 1000 : 0) + (a.tbr || 0);
             const bScore = (b.acodec && b.acodec !== 'none' ? 1000 : 0) + (b.tbr || 0);
             return bScore - aScore;
         });
         usedTiers.add(best.height);
 
-        // Estimar tamaño: sumar video + mejor audio posible
+        // Estimar tamaño
         const audioFormats = formats.filter(f =>
             f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none')
         );
@@ -171,13 +280,11 @@ function buildFormatOptions(info) {
             ? Math.round(totalBitrate * 1000 / 8 * duration)
             : best.filesize || best.filesize_approx || 0;
 
-        // Construir format spec limpio para yt-dlp
         const hasAudio = best.acodec && best.acodec !== 'none';
         const fmtSpec = hasAudio
             ? `best[height<=${best.height}]`
             : `bestvideo[height<=${best.height}]+bestaudio/best[height<=${best.height}]`;
 
-        // Etiqueta humana
         const label = best.height >= 2160 ? `${best.height}p (4K)` :
                       best.height >= 1440 ? `${best.height}p (2K)` :
                       `${best.height}p`;
@@ -216,13 +323,12 @@ async function downloadMedia(url, formatSpec, outputDir) {
         '--merge-output-format', 'mp4',
         '--no-warnings',
         '--no-playlist',
-        '--no-part',           // No usar archivos .part
+        '--no-part',
         '--no-mtime',
         '-o', outputTemplate,
         url
     ]);
 
-    // Encontrar el archivo descargado (yt-dlp crea un archivo con el título del video)
     const files = await fs.readdir(outputDir);
     const videoFile = files.find(f => f !== '.' && f !== '..' && !f.startsWith('.'));
     if (!videoFile) throw new Error('No se encontró el archivo descargado.');
@@ -231,7 +337,7 @@ async function downloadMedia(url, formatSpec, outputDir) {
 
 // ─── Interfaz de texto para el menú de formatos ─────────────────────────
 
-function buildMenuText(info, options, prefix) {
+function buildMenuText(info, options) {
     const lines = [];
     lines.push('╭━━━━━━━━━━━━━━━━━━━━');
     lines.push(`┃ 📹 *${info.title}*`);
@@ -254,9 +360,8 @@ function buildMenuText(info, options, prefix) {
     });
 
     lines.push('');
-    lines.push(`Responde con:  ${prefix}ytdl <núm>`);
-    lines.push(`Ejemplo: ${prefix}ytdl 3  (para 1080p)`);
-    lines.push(`${prefix}ytdl cancel para salir`);
+    lines.push('Responde con:  `.ytdl <núm>`  (ej: `.ytdl 3`)');
+    lines.push('`.ytdl cancel` para salir');
 
     return lines.join('\n');
 }
@@ -264,23 +369,23 @@ function buildMenuText(info, options, prefix) {
 // ─── Handler principal ───────────────────────────────────────────────────
 
 module.exports = {
+    // ytdlp agregado como alias para quienes escriben con 'p' al final
     commands: ['ytdl', 'ytdlp', 'yt', 'youtube'],
 
     handler: async (sock, msg, args, store) => {
         const jid = msg.key.remoteJid;
-        // En grupos el sender es el participant; en privado es el remoteJid
         const sender = msg.key.participant || jid;
         const pushName = msg.pushName || 'Usuario';
-        const prefix = detectPrefix(msg);
 
-        console.log(`📹 ytdl — llamado por ${pushName} (${sender}) args: [${args.join(', ')}]`);
+        // Log de depuración: mostrar quién llamó y con qué args
+        console.log(`📹 ytdl — llamado por ${pushName} (${sender}) args:`, JSON.stringify(args));
 
         try {
             // ─── CASO 1: Cancelar sesión ────────────────────────────────
             if (args[0]?.toLowerCase() === 'cancel') {
                 if (pendingSessions.has(sender)) {
                     pendingSessions.delete(sender);
-                    console.log(`🚫 ytdl — ${pushName} canceló la descarga`);
+                    console.log(`📹 ytdl: sesión cancelada por ${pushName}`);
                     await sock.sendMessage(jid, { text: '✅ Descarga cancelada.' }, { quoted: msg });
                 } else {
                     await sock.sendMessage(jid, { text: '❌ No tienes ninguna descarga activa.' }, { quoted: msg });
@@ -295,17 +400,18 @@ module.exports = {
                 const { info, options } = session;
 
                 if (selection < 1 || selection > options.length) {
+                    console.log(`📹 ytdl: selección inválida ${selection} (rango: 1-${options.length})`);
                     await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
                     await sock.sendMessage(jid, {
-                        text: `❌ Número inválido. Elige entre 1 y ${options.length}.\nUsa "${prefix}ytdl cancel" para salir.`
+                        text: `❌ Número inválido. Elige entre 1 y ${options.length}.\nUsa \`.ytdl cancel\` para salir.`
                     }, { quoted: msg });
                     return;
                 }
 
                 const selected = options[selection - 1];
-                pendingSessions.delete(sender); // Consumir la sesión
-                console.log(`📥 ytdl — ${pushName} seleccionó opción ${selection}: ${selected.label} — ${info.title}`);
+                pendingSessions.delete(sender);
 
+                console.log(`📹 ytdl: ${pushName} seleccionó #${selection} → ${selected.label} (${selected.formatSpec})`);
                 await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
 
                 // ── Descargar ──
@@ -318,25 +424,21 @@ module.exports = {
                     );
                     const stat = await fs.stat(downloadedPath);
                     const fileSize = stat.size;
+                    console.log(`📹 ytdl: descarga completada → ${path.basename(downloadedPath)} (${fmtSize(fileSize)})`);
 
-                    // ── Leer el buffer ──
                     const fileBuffer = await fs.readFile(downloadedPath);
                     const ext = path.extname(downloadedPath).toLowerCase();
 
                     // ── Enviar según tipo ──
                     if (selected.isAudio) {
-                        // Enviar como audio
                         await sock.sendMessage(jid, {
                             audio: fileBuffer,
                             mimetype: 'audio/mpeg',
                             ptt: false
                         }, { quoted: msg });
                     } else if (ext === '.mp4' || ext === '.webm' || ext === '.mkv') {
-                        // Convertir a mp4 si es necesario (yt-dlp ya mergea a mp4)
                         const actualExt = ext === '.mkv' || ext === '.webm' ? '.mp4' : ext;
-                        let sendBuffer = fileBuffer;
 
-                        // Si el archivo es muy grande, advertir
                         if (fileSize > WARN_SIZE) {
                             await sock.sendMessage(jid, {
                                 text: `⚠️ El archivo pesa ${fmtSize(fileSize)}. WhatsApp puede rechazar archivos >64 MB.`
@@ -344,26 +446,25 @@ module.exports = {
                         }
 
                         await sock.sendMessage(jid, {
-                            video: sendBuffer,
+                            video: fileBuffer,
                             caption: `📹 ${info.title}`,
                             mimetype: `video/${actualExt.replace('.', '')}`
                         }, { quoted: msg });
                     } else {
-                        // Enviar como documento genérico
                         await sock.sendMessage(jid, {
                             document: fileBuffer,
-                            mimetype: `application/octet-stream`,
+                            mimetype: 'application/octet-stream',
                             fileName: path.basename(downloadedPath)
                         }, { quoted: msg });
                     }
 
-                    console.log(`✅ ytdl — ${pushName}: video enviado (${selected.label}, ${fmtSize(fileSize)}) — ${info.title}`);
+                    console.log(`📹 ytdl: video enviado a ${jid}`);
                     await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
                 } catch (dlErr) {
-                    console.error('Error en descarga ytdl:', dlErr);
+                    console.error('❌ ytdl: error en descarga:', dlErr.message);
                     await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
                     await sock.sendMessage(jid, {
-                        text: `❌ Error descargando: ${dlErr.message.slice(0, 200)}`
+                        text: `❌ Error descargando: ${dlErr.message.slice(0, 250)}`
                     }, { quoted: msg });
                 } finally {
                     await cleanupDir(tmpDir);
@@ -374,18 +475,19 @@ module.exports = {
             // ─── CASO 3: Nueva descarga (primer paso) ────────────────────
             const url = args[0];
             if (!url) {
+                console.log('📹 ytdl: uso sin args — mostrando ayuda');
                 await sock.sendMessage(jid, {
                     text: [
                         '📹 *YouTube Downloader*',
                         '',
                         'Uso:',
-                        `  ${prefix}ytdl <url> — Lista resoluciones disponibles`,
-                        `  ${prefix}ytdl <núm> — Descarga la opción seleccionada`,
-                        `  ${prefix}ytdl cancel — Cancela la descarga actual`,
+                        '  `!ytdl <url>` — Lista resoluciones disponibles',
+                        '  `!ytdl <núm>` — Descarga la opción seleccionada',
+                        '  `!ytdl cancel` — Cancela la descarga actual',
                         '',
                         'Ejemplos:',
-                        `  ${prefix}ytdl https://youtube.com/watch?v=xxx`,
-                        `  ${prefix}ytdl 3  (selecciona la opción 3)`,
+                        '  `!ytdl https://youtube.com/watch?v=xxx`',
+                        '  `!ytdl 3`  (selecciona la opción 3)',
                     ].join('\n')
                 }, { quoted: msg });
                 await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
@@ -396,6 +498,7 @@ module.exports = {
             const urlLower = url.toLowerCase();
             if (!urlLower.includes('youtube.com') && !urlLower.includes('youtu.be') &&
                 !urlLower.includes('m.youtube.com') && !urlLower.includes('youtube-nocookie.com')) {
+                console.log(`📹 ytdl: URL inválida: ${url}`);
                 await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
                 await sock.sendMessage(jid, {
                     text: '❌ Eso no parece un enlace de YouTube válido.\nAsegúrate de incluir el `https://`.'
@@ -403,19 +506,26 @@ module.exports = {
                 return;
             }
 
-            // Informar sobre cookies si no existen
-            if (!fs.existsSync(COOKIES_PATH)) {
+            // Verificar cookies antes de empezar
+            const cookiesAvailable = COOKIES_CANDIDATES.some(f => fs.existsSync(f));
+            if (!cookiesAvailable) {
+                console.log('📹 ytdl: sin cookies — advirtiendo al usuario');
                 await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
                 await sock.sendMessage(jid, {
-                    text: '⚠️ No se encontró `assets/www.youtube.com_cookies.json`.\nVideos restringidos por edad/región pueden fallar.'
+                    text: '⚠️ No se encontró archivo de cookies.\nVideos restringidos pueden fallar.\nGuía: coloca `assets/www.youtube.com_cookies.json` con cookies exportadas (formato JSON o Netscape).'
                 }, { quoted: msg });
             } else {
+                console.log('📹 ytdl: cookies encontradas, procesando...');
                 await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
             }
 
             // Obtener info del video
+            console.log(`📹 ytdl: obteniendo info de: ${url}`);
             const info = await fetchVideoInfo(url);
+            console.log(`📹 ytdl: info obtenida → "${info.title}" (${fmtDuration(info.duration)})`);
+
             const options = buildFormatOptions(info);
+            console.log(`📹 ytdl: ${options.length} opciones de formato generadas`);
 
             if (options.length === 0) {
                 await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
@@ -432,25 +542,33 @@ module.exports = {
                 createdAt: Date.now()
             });
 
-            console.log(`📋 ytdl — ${pushName}: menú enviado con ${options.length} opciones para: ${info.title}`);
             // Enviar menú de selección
-            const menuText = buildMenuText(info, options, prefix);
+            const menuText = buildMenuText(info, options);
             await sock.sendMessage(jid, { text: menuText }, { quoted: msg });
             await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
+            console.log(`📹 ytdl: menú enviado a ${pushName} — esperando selección`);
 
         } catch (err) {
-            console.error('Error en addon ytdl:', err);
-            await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+            console.error('❌ ytdl: ERROR GENERAL:', err.message);
+
             // Limpiar sesión si existe
             if (sender) pendingSessions.delete(sender);
+            if (COOKIES_TEMP_FILE) cleanupCookiesTemp();
 
-            // Mensaje de error amigable
+            await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+
             const errMsg = err.message || 'Error desconocido';
-            if (errMsg.includes('HTTP Error 403') || errMsg.includes('private') || errMsg.includes('Private video')) {
+
+            // Mensajes específicos según el error
+            if (errMsg.includes('Cookies file must be Netscape')) {
                 await sock.sendMessage(jid, {
-                    text: '❌ El video es privado o requiere inicio de sesión.\nExporta tus cookies de YouTube a `assets/www.youtube.com_cookies.json`'
+                    text: '❌ El archivo de cookies tiene formato incorrecto.\nAsegúrate de usar la extensión "cookies_localy.txt" que exporta en formato Netscape, o coloca el archivo JSON y el bot lo convertirá automáticamente.'
                 }, { quoted: msg });
-            } else if (errMsg.includes('not available') || errMsg.includes('No video results')) {
+            } else if (errMsg.includes('HTTP Error 403') || errMsg.includes('private') || errMsg.includes('Private video')) {
+                await sock.sendMessage(jid, {
+                    text: '❌ El video es privado o requiere inicio de sesión.\nExporta tus cookies con la extensión "cookies_localy.txt" y colócalas en `assets/www.youtube.com_cookies.json`'
+                }, { quoted: msg });
+            } else if (errMsg.includes('not available') || errMsg.includes('No video results') || errMsg.includes('Video unavailable')) {
                 await sock.sendMessage(jid, {
                     text: '❌ Video no disponible. Puede haber sido eliminado o restringido en tu región.'
                 }, { quoted: msg });
@@ -458,9 +576,13 @@ module.exports = {
                 await sock.sendMessage(jid, {
                     text: '❌ Error con caracteres especiales en el título. Prueba con otro video.'
                 }, { quoted: msg });
+            } else if (errMsg.includes('Premature close') || errMsg.includes('ECONNRESET') || errMsg.includes('ETIMEDOUT')) {
+                await sock.sendMessage(jid, {
+                    text: '❌ Error de conexión con YouTube. Reintenta en unos segundos.'
+                }, { quoted: msg });
             } else {
                 await sock.sendMessage(jid, {
-                    text: `❌ Error: ${errMsg.slice(0, 250)}`
+                    text: `❌ Error: ${errMsg.slice(0, 300)}`
                 }, { quoted: msg });
             }
         }
