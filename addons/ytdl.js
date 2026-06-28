@@ -194,18 +194,39 @@ async function cleanupDir(dir) {
 
 /**
  * Ejecuta yt-dlp y devuelve stdout.
- * Incluye automáticamente --js-runtimes con el Node.js que ejecuta el bot
- * (necesario porque YouTube ya no extrae formatos sin JS runtime).
+ * Incluye automáticamente:
+ *   - --js-runtimes deno para resolver el n-challenge de YouTube
+ *   - --remote-components ejs:github para descargar el script solver
+ *   - --cookies si el archivo existe
  * Lanza un error descriptivo si falla.
  */
-const JS_RUNTIME_ARG = `node:${process.execPath}`;
+let DENO_PATH = null;
+try {
+    const { execFileSync } = require('child_process');
+    DENO_PATH = execFileSync('which', ['deno'], { encoding: 'utf-8', timeout: 5000 }).trim();
+    console.log(`🦕 ytdl: Deno detectado en ${DENO_PATH}`);
+} catch (_) {
+    console.warn('⚠️ ytdl: Deno no instalado. YouTube puede no devolver formatos de video.');
+    console.warn('   Instalá Deno con: curl -fsSL https://deno.land/install.sh | sh');
+    DENO_PATH = null;
+}
+
+const JS_RUNTIME_BASE = DENO_PATH ? `deno:${DENO_PATH}` : null;
 
 async function ytdlp(args) {
-    // Preparar argumento de cookies
+    // Preparar argumentos base: siempre remote-components ejs:github
+    const baseArgs = ['--remote-components', 'ejs:github'];
+
+    // Agregar --js-runtimes si Deno está disponible
+    if (JS_RUNTIME_BASE) {
+        baseArgs.push('--js-runtimes', JS_RUNTIME_BASE);
+    }
+
+    // Agregar --cookies si existe el archivo
     const cookiesFile = prepareCookies();
     const allArgs = cookiesFile
-        ? ['--cookies', cookiesFile, '--js-runtimes', JS_RUNTIME_ARG, ...args]
-        : ['--js-runtimes', JS_RUNTIME_ARG, ...args];
+        ? ['--cookies', cookiesFile, ...baseArgs, ...args]
+        : [...baseArgs, ...args];
 
     try {
         const { stdout } = await execFileP('yt-dlp', allArgs, {
@@ -572,7 +593,14 @@ module.exports = {
                 await sock.sendMessage(jid, {
                     text: '❌ El video es privado o requiere inicio de sesión.\nExporta tus cookies con la extensión "cookies_localy.txt" y colócalas en `assets/www.youtube.com_cookies.json`'
                 }, { quoted: msg });
-            } else if (errMsg.includes('not available') || errMsg.includes('No video results') || errMsg.includes('Video unavailable')) {
+            } else if (errMsg.includes('n challenge solving failed') || errMsg.includes('Requested format is not available')) {
+                const denoHint = DENO_PATH
+                    ? '⚠️ El n-challenge de YouTube falló incluso con Deno.'
+                    : '❌ YouTube requiere Deno para resolver el n-challenge.\n   Instalá Deno en el servidor:\n   curl -fsSL https://deno.land/install.sh | sh\n   y reiniciá el bot con !restart';
+                await sock.sendMessage(jid, {
+                    text: `❌ YouTube bloqueó la descarga.\n${denoHint}`
+                }, { quoted: msg });
+            } else if (errMsg.includes('No video results') || errMsg.includes('Video unavailable')) {
                 await sock.sendMessage(jid, {
                     text: '❌ Video no disponible. Puede haber sido eliminado o restringido en tu región.'
                 }, { quoted: msg });
