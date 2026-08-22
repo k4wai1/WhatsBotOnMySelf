@@ -19,23 +19,13 @@ function detectCommand(msg) {
 }
 
 async function pingWhatsAppServers(sock) {
-    // 1) Ping de protocolo clásico; muchos servidores ya no responden,
-    //    así que se limita a 5s para no colgar el comando.
-    const start = Date.now();
-    try {
-        await sock.query({
-            tag: 'iq',
-            attrs: { to: '@s.whatsapp.net', type: 'get', xmlns: 'w:pinger' }
-        }, 5000);
-        return { ms: Date.now() - start, via: 'protocolo' };
-    } catch (_) {}
-
-    // 2) Fallback: consulta de registro contra la base de WA (round-trip real)
+    // Consulta de registro contra los servidores de WA (round-trip real).
+    // Nota: el iq 'w:pinger' clásico ya no recibe respuesta, por eso no se usa.
     const meId = sock.authState?.creds?.me?.id?.split(':')[0] || '1';
     const jidNum = meId.includes('@') ? meId : meId + '@s.whatsapp.net';
-    const t2 = Date.now();
+    const start = Date.now();
     await sock.onWhatsApp(jidNum);
-    return { ms: Date.now() - t2, via: 'consulta' };
+    return Date.now() - start;
 }
 
 module.exports = {
@@ -48,13 +38,12 @@ module.exports = {
         try {
             if (cmd === 'ping') {
                 await sock.sendMessage(jid, { react: { text: '📡', key: msg.key } });
-                const { ms, via } = await pingWhatsAppServers(sock);
+                const ms = await pingWhatsAppServers(sock);
                 await sock.sendMessage(jid, {
                     text: [
                         '🚀 *Ping a WhatsApp*',
                         '',
-                        `⚡ Latencia: *${ms}ms*`,
-                        `🛰️ Vía: ${via}`
+                        `⚡ Latencia: *${ms}ms*`
                     ].join('\n')
                 }, { quoted: msg });
                 await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
