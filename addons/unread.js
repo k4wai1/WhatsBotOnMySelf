@@ -181,4 +181,10 @@ Tu tarea:
   }
 }
 
-module.exports = { commands, handler, init };
+// ─── Acceso al historial para otros addons (misma instancia vía require) ──
+function getRecent(jid, n = 30) {
+  const h = chatHistory.get(jid);
+  return h ? h.slice(-n) : [];
+}
+
+module.exports = { commands, handler, init, getRecent };
