@@ -19,12 +19,23 @@ function detectCommand(msg) {
 }
 
 async function pingWhatsAppServers(sock) {
+    // 1) Ping de protocolo clásico; muchos servidores ya no responden,
+    //    así que se limita a 5s para no colgar el comando.
     const start = Date.now();
-    await sock.query({
-        tag: 'iq',
-        attrs: { to: '@s.whatsapp.net', type: 'get', xmlns: 'w:pinger' }
-    });
-    return Date.now() - start;
+    try {
+        await sock.query({
+            tag: 'iq',
+            attrs: { to: '@s.whatsapp.net', type: 'get', xmlns: 'w:pinger' }
+        }, 5000);
+        return { ms: Date.now() - start, via: 'protocolo' };
+    } catch (_) {}
+
+    // 2) Fallback: consulta de registro contra la base de WA (round-trip real)
+    const meId = sock.authState?.creds?.me?.id?.split(':')[0] || '1';
+    const jidNum = meId.includes('@') ? meId : meId + '@s.whatsapp.net';
+    const t2 = Date.now();
+    await sock.onWhatsApp(jidNum);
+    return { ms: Date.now() - t2, via: 'consulta' };
 }
 
 module.exports = {
@@ -37,12 +48,13 @@ module.exports = {
         try {
             if (cmd === 'ping') {
                 await sock.sendMessage(jid, { react: { text: '📡', key: msg.key } });
-                const latency = await pingWhatsAppServers(sock);
+                const { ms, via } = await pingWhatsAppServers(sock);
                 await sock.sendMessage(jid, {
                     text: [
                         '🚀 *Ping a WhatsApp*',
                         '',
-                        `⚡ Latencia: *${latency}ms*`
+                        `⚡ Latencia: *${ms}ms*`,
+                        `🛰️ Vía: ${via}`
                     ].join('\n')
                 }, { quoted: msg });
                 await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
