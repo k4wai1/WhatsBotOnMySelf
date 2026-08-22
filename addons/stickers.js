@@ -2,6 +2,7 @@
 const { downloadMediaMessage } = require('@whiskeysockets/baileys');
 const ffmpeg = require('fluent-ffmpeg');
 const fs = require('fs').promises;
+const fss = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 const util = require('util');
@@ -12,21 +13,41 @@ const rmDirSafe = async (p) => fs.rm(p, { recursive: true, force: true }).catch(
 
 // --- Estado global para sesiones de colección ---
 const sessions = {};
-let sockInstance = null;
-let listenerRegistered = false;
+const STICKER_CMDS = new Set(['st', 'sticker', 's']);
+let cachedPrefixes = null;
+let prefixesAt = 0;
 
-// --- Registro del listener global (una sola vez) ---
+function getPrefixes() {
+    const now = Date.now();
+    if (cachedPrefixes && now - prefixesAt < 10000) return cachedPrefixes;
+    let prefixes = [',', '!', '/'];
+    try {
+        const cfg = JSON.parse(fss.readFileSync(path.join(__dirname, '..', 'assets', 'config.json'), 'utf-8'));
+        if (Array.isArray(cfg.prefixes) && cfg.prefixes.length) prefixes = cfg.prefixes;
+    } catch (_) {}
+    cachedPrefixes = prefixes;
+    prefixesAt = now;
+    return prefixes;
+}
+
+function isStickerCommand(text) {
+    if (!text) return false;
+    for (const p of getPrefixes()) {
+        if (text.startsWith(p)) {
+            const cmd = text.slice(p.length).trim().split(/\s+/)[0]?.toLowerCase();
+            if (STICKER_CMDS.has(cmd)) return true;
+        }
+    }
+    return false;
+}
+
+// --- Registro del listener (uno por socket vivo; index llama init() en cada reconexión) ---
 function registerListener(sock) {
-    if (listenerRegistered) return;
-    listenerRegistered = true;
-    sockInstance = sock;
-
     sock.ev.on('messages.upsert', async ({ messages }) => {
         for (const msg of messages) {
             // Ignorar mensajes que sean comandos (los gestiona el handler)
             const text = msg.message?.extendedTextMessage?.text || '';
-            const isCommand = text.startsWith('.s') || text.startsWith('!st') || text.startsWith('.sticker');
-            if (isCommand) continue;
+            if (isStickerCommand(text)) continue;
 
             const jid = msg.key.remoteJid;
             const session = sessions[jid];
@@ -120,7 +141,7 @@ async function processCollection(sock, jid, session) {
             }
 
             const sizeLimit = isAnimatedInput ? 1000000 : 100000;
-            if (finalBuffer.length > sizeLimit) {
+            if (!finalBuffer || finalBuffer.length > sizeLimit) {
                 await sock.sendMessage(jid, { text: `⚠️ Un archivo supera el límite de tamaño (${(sizeLimit/1000).toFixed(0)} KB) y no se pudo procesar.` });
                 continue;
             }
@@ -345,7 +366,7 @@ async function processStaticToMaxUtilization(buffer, isCrop, shapeMode, diskDir,
             else qMin = q + 1;
         }
 
-        return bestBuffer;
+        return bestBuffer || (await fs.readFile(outputPath));
     } finally {
         await unlinkSafe(inputPath); await unlinkSafe(outputPath);
     }
@@ -391,12 +412,11 @@ function getDurationAndFps(filePath) {
 module.exports = {
     commands: ['st', 'sticker', 's'],
 
-    handler: async (sock, msg, args) => {
-        // Registrar el listener global si no existe
-        if (!listenerRegistered) {
-            registerListener(sock);
-        }
+    init: (sock) => {
+        registerListener(sock);
+    },
 
+    handler: async (sock, msg, args) => {
         const cacheDir = path.join(__dirname, '..', 'cache');
         await fs.mkdir(cacheDir, { recursive: true }).catch(() => {});
 
@@ -424,9 +444,14 @@ module.exports = {
                 isActive: true,
                 timeout: setTimeout(async () => {
                     session.isActive = false;
-                    await processCollection(sock, jid, session);
                     delete sessions[jid];
-                }, 60000) // 60 segundos
+                    try {
+                        await processCollection(sock, jid, session);
+                    } catch (e) {
+                        console.error('Error procesando colección de stickers:', e);
+                        await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } }).catch(() => {});
+                    }
+                }, 120000) // 2 minutos
             };
             sessions[jid] = session;
 
@@ -535,7 +560,7 @@ module.exports = {
             }
 
             const sizeLimit = isAnimatedInput ? 1000000 : 100000;
-            if (finalBuffer.length > sizeLimit) {
+            if (!finalBuffer || finalBuffer.length > sizeLimit) {
                 await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
                 return;
             }

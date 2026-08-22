@@ -12,8 +12,8 @@ const ensureTempDir = async (sessionId) => {
     return dir;
 };
 
-const downloadAudio = async (audioMsg) => {
-    const stream = await downloadContentFromMessage(audioMsg, 'audio');
+const downloadAudio = async (mediaMsg, type) => {
+    const stream = await downloadContentFromMessage(mediaMsg, type);
     let buffer = Buffer.from([]);
     for await (const chunk of stream) {
         buffer = Buffer.concat([buffer, chunk]);
@@ -82,12 +82,16 @@ module.exports = {
         const jid = msg.key.remoteJid;
         const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
         const audioMsg = quotedMsg?.audioMessage;
+        const videoMsg = quotedMsg?.videoMessage;
+        const mediaMsg = audioMsg || videoMsg;
 
-        if (!audioMsg) {
+        if (!mediaMsg) {
             await sock.sendMessage(jid, { react: { text: '🎧', key: msg.key } });
-            await sock.sendMessage(jid, { text: '❌ Debes responder a un mensaje de audio.' }, { quoted: msg });
+            await sock.sendMessage(jid, { text: '❌ Debes responder a un mensaje de audio o video.' }, { quoted: msg });
             return;
         }
+
+        const mediaType = audioMsg ? 'audio' : 'video';
 
         const sessionId = crypto.randomBytes(4).toString('hex');
         let tempDir;
@@ -97,11 +101,11 @@ module.exports = {
             const processedAudioPath = path.join(tempDir, 'processed.ogg');
 
             await sock.sendMessage(jid, { react: { text: '📥', key: msg.key } });
-            const audioBuffer = await downloadAudio(audioMsg);
-            
+            const audioBuffer = await downloadAudio(mediaMsg, mediaType);
+
             // 🛡️ Validación estricta para evitar crasheos por audios expirados o nulos
             if (!audioBuffer || audioBuffer.length === 0) {
-                throw new Error("El buffer devuelto está vacío. El audio original podría estar expirado o inaccesible.");
+                throw new Error("El buffer devuelto está vacío. El medio original podría estar expirado o inaccesible.");
             }
 
             await fs.writeFile(rawAudioPath, audioBuffer);
@@ -183,14 +187,14 @@ module.exports = {
             }
 
             await sock.sendMessage(jid, {
-                text: `🎵 *Editor de audio AU*\nComandos:\n- \`.au vn\` → convierte el audio a nota de voz.\n- \`.au audio\` → convierte a audio normal.\n- \`.au r <inicio> <fin> [vn]\` → recorta del segundo A al B. Agrega "vn" al final para que sea nota de voz.\nEjemplo: \`.au r 2,5 8.3 vn\``
+                text: `🎵 *Editor de audio AU*\nComandos:\n- \`.au vn\` → convierte el audio/video a nota de voz.\n- \`.au audio\` → convierte a audio normal.\n- \`.au r <inicio> <fin> [vn]\` → recorta del segundo A al B. Agrega "vn" al final para que sea nota de voz.\nEjemplo: \`.au r 2,5 8.3 vn\`\n\n💡 Funciona con audios y videos (extrae el audio del video automáticamente).`
             }, { quoted: msg });
             await sock.sendMessage(jid, { react: { text: 'ℹ️', key: msg.key } });
 
         } catch (error) {
             console.error('Error en AU:', error);
             await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
-            await sock.sendMessage(jid, { text: `❌ Error procesando audio: ${error.message}` }, { quoted: msg });
+            await sock.sendMessage(jid, { text: `❌ Error procesando medio: ${error.message}` }, { quoted: msg });
         } finally {
             if (tempDir) await fs.remove(tempDir).catch(() => {});
         }
