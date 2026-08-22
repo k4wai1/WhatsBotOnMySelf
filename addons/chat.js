@@ -197,6 +197,57 @@ function timeAgo(ts) {
     return `hace ${Math.round(hours / 24)} d`;
 }
 
+// ─── Rescate de tool-calls emitidas como texto (formato DSML interno) ──────
+const BAR = '[｜|]';
+const dsmlInvokeRe = new RegExp(`<${BAR}*\\s*DSML${BAR}*\\s*invoke\\s+name=["']([^"']+)["']([\\s\\S]*?)<\\/${BAR}*\\s*DSML${BAR}*\\s*invoke>`, 'g');
+const dsmlParamRe = new RegExp(`<${BAR}*\\s*DSML${BAR}*\\s*parameter\\s+name=["']([^"']+)["'][^>]*>([\\s\\S]*?)<\\/${BAR}*\\s*DSML${BAR}*\\s*parameter>`, 'g');
+const dsmlTagRe = new RegExp(`<\\/?${BAR}*\\s*DSML${BAR}*\\s*[^>]*>`, 'g');
+
+function parseDsmlToolCalls(content) {
+    const calls = [];
+    let m;
+    dsmlInvokeRe.lastIndex = 0;
+    while ((m = dsmlInvokeRe.exec(content)) !== null) {
+        const args = {};
+        let p;
+        dsmlParamRe.lastIndex = 0;
+        while ((p = dsmlParamRe.exec(m[2])) !== null) {
+            args[p[1]] = p[2].trim();
+        }
+        calls.push({
+            id: `dsml_${Date.now()}_${calls.length}`,
+            type: 'function',
+            function: { name: m[1], arguments: JSON.stringify(args) }
+        });
+    }
+    return calls;
+}
+
+function sanitizeDsmlText(text) {
+    return String(text || '').replace(dsmlTagRe, '').trim();
+}
+
+// Acepta chartConfig correcto o parámetros inventados (tipo/datos/titulo) y los normaliza
+function normalizeChartArgs(a = {}) {
+    let cfg = a.chartConfig ?? a.chart_config ?? null;
+    if (cfg && typeof cfg === 'object') return JSON.stringify(cfg);
+    if (typeof cfg === 'string' && cfg.trim().startsWith('{')) {
+        try { JSON.parse(cfg); return cfg.trim(); } catch {}
+    }
+    const data = a.datos ?? a.data ?? a.datasets ?? null;
+    if (!data) return null;
+    let dataObj = data;
+    if (typeof dataObj === 'string') {
+        try { dataObj = JSON.parse(dataObj); } catch { return null; }
+    }
+    if (Array.isArray(dataObj)) dataObj = { labels: [], datasets: [{ label: '', data: dataObj }] };
+    const type = String(a.tipo || a.type || 'bar').replace(/["'\\]/g, '') || 'bar';
+    const chart = { type, data: dataObj };
+    const title = a.titulo || a.title;
+    if (title) chart.options = { title: { display: true, text: String(title) } };
+    return JSON.stringify(chart);
+}
+
 module.exports = {
     commands: ['chat', 'c'],
 
@@ -292,6 +343,12 @@ TUS HERRAMIENTAS:
 - buscar_web_parallel (Parallel Search MCP): búsqueda web alternativa con resultados recientes y extractos. Úsala como segunda opción o si You.com falla/devuelve poco.
 - buscar_anime (AniList): datos exactos de anime/manga.
 - generar_grafico (QuickChart): gráficos Chart.js; incluye un breve análisis en tu respuesta final pero NUNCA pegues la URL (la imagen se envía sola).
+
+USO CORRECTO DE HERRAMIENTAS (CRÍTICO):
+- Invoca las herramientas EXCLUSIVAMENTE mediante el mecanismo nativo de function calling del API. NUNCA escribas la llamada dentro de tu texto, ni en XML, ni en formato DSML, ni con etiquetas <invoke> o <parameter>.
+- Para generar un gráfico usa SOLO el parámetro 'chartConfig': un STRING con UN objeto JSON válido de Chart.js completo. Ejemplo de llamada correcta:
+  generar_grafico(chartConfig="{\\"type\\":\\"bar\\",\\"data\\":{\\"labels\\":[\\"A\\",\\"B\\"],\\"datasets\\":[{\\"label\\":\\"Ventas\\",\\"data\\":[10,20]}]},\\"options\\":{\\"title\\":{\\"display\\":true,\\"text\\":\\"Mi título\\"}}}")
+  El JSON debe incluir 'type', 'data' (con labels y datasets) y opcionalmente 'options.title'. NO inventes parámetros adicionales como tipo/datos/titulo por separado: todo va DENTRO del JSON de chartConfig.
 
 POLÍTICA DE BÚSQUEDA WEB:
 - Si la petición NO necesita información actual ni verificación externa (charla, opiniones, código, mates, conocimiento estable), responde DIRECTO sin herramientas.
@@ -392,6 +449,17 @@ REGLAS DE FORMATO:
 
             while (!isFinished && iterations < MAX_ITERATIONS) {
                 const responseMessage = await callDeepSeek(true);
+
+                // Rescate: a veces el modelo emite la llamada como texto DSML en vez de tool_calls nativas
+                if (!responseMessage.tool_calls && typeof responseMessage.content === 'string' && responseMessage.content.includes('DSML')) {
+                    const rescued = parseDsmlToolCalls(responseMessage.content);
+                    if (rescued.length) {
+                        console.warn(`⚠️ chat: ${rescued.length} tool-call(s) rescatada(s) de texto DSML`);
+                        responseMessage.tool_calls = rescued;
+                        responseMessage.content = sanitizeDsmlText(responseMessage.content.replace(dsmlInvokeRe, ''));
+                    }
+                }
+
                 messages.push(responseMessage);
 
                 if (responseMessage.tool_calls) {
@@ -417,9 +485,14 @@ REGLAS DE FORMATO:
                             } else if (toolCall.function.name === 'buscar_anime') {
                                 toolResult = await fetchAniList(toolArgs.query);
                             } else if (toolCall.function.name === 'generar_grafico') {
-                                const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(toolArgs.chartConfig)}&w=800&h=400&bkg=white`;
-                                imagesToSend.push(chartUrl);
-                                toolResult = `Gráfico generado exitosamente en: ${chartUrl}. Procede a dar la explicación al usuario.`;
+                                const chartConfig = normalizeChartArgs(toolArgs);
+                                if (!chartConfig) {
+                                    toolResult = 'Argumentos inválidos para generar_grafico. Debes pasar SOLO el parámetro chartConfig: un string con JSON válido de Chart.js (type, data.labels, data.datasets).';
+                                } else {
+                                    const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(chartConfig)}&w=800&h=400&bkg=white`;
+                                    imagesToSend.push(chartUrl);
+                                    toolResult = `Gráfico generado exitosamente en: ${chartUrl}. Procede a dar la explicación al usuario.`;
+                                }
                             } else {
                                 toolResult = `Herramienta desconocida: ${toolCall.function.name}`;
                             }
@@ -457,7 +530,7 @@ REGLAS DE FORMATO:
             }
 
             if (finalMessage && finalMessage.trim()) {
-                await sock.sendMessage(jid, { text: finalMessage.trim() }, { quoted: msg });
+                await sock.sendMessage(jid, { text: sanitizeDsmlText(finalMessage) }, { quoted: msg });
             }
 
             await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
