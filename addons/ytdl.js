@@ -500,11 +500,44 @@ async function sendMenuWithThumbnail(sock, jid, menuText, thumbnailUrl, quotedMs
     await sock.sendMessage(jid, { text: menuText }, { quoted: quotedMsg });
 }
 
+// ─── Auto-actualización de yt-dlp ────────────────────────────────────────
+// Corre al inicio (con retardo) y luego cada 24 h. No bloquea el bot.
+const YT_DLP_UPDATE_INTERVAL = 24 * 60 * 60 * 1000;
+let ytdlpUpdateTimer = null;
+
+async function autoUpdateYtDlp() {
+    try {
+        const { stdout } = await execFileP('yt-dlp', ['-U'], { timeout: 120000 });
+        const out = (stdout || '').trim();
+        if (/pip or using the wheel/i.test(out)) {
+            // Instalado vía pip/wheel: el self-updater no funciona
+            await execFileP('python3', ['-m', 'pip', 'install', '--user', '--break-system-packages', '-U', 'yt-dlp'], { timeout: 180000 });
+            console.log('⬆️ ytdl: yt-dlp actualizado vía pip.');
+        } else {
+            console.log(`⬆️ ytdl: ${out.split('\n').pop() || 'yt-dlp verificado'}`);
+        }
+    } catch (e) {
+        console.warn('⚠️ ytdl: auto-actualización falló (no crítico):', e.message);
+    }
+}
+
+function scheduleYtDlpUpdates() {
+    if (ytdlpUpdateTimer) clearTimeout(ytdlpUpdateTimer);
+    setTimeout(() => {
+        autoUpdateYtDlp();
+        ytdlpUpdateTimer = setInterval(autoUpdateYtDlp, YT_DLP_UPDATE_INTERVAL);
+    }, 60 * 1000).unref();
+}
+
 // ─── Handler principal ───────────────────────────────────────────────────
 
 module.exports = {
     // ytdlp agregado como alias para quienes escriben con 'p' al final
     commands: ['ytdl', 'ytdlp', 'yt', 'youtube'],
+
+    init: () => {
+        scheduleYtDlpUpdates();
+    },
 
     handler: async (sock, msg, args, store) => {
         const jid = msg.key.remoteJid;
