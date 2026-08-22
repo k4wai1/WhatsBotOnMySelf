@@ -42,22 +42,25 @@
 
 | Addon | Description |
 |---|---|
-| `stickers` | Convert images/videos to WhatsApp stickers |
+| `stickers` | Convert images/videos/GIFs to stickers + `.st a` collection mode (send multiple files, each becomes a sticker) |
 | `trans` | Translate text messages |
 | `cita` | Generate beautiful quote images |
-| `chat` | AI chat using APIs (DeepSeek, etc.) |
+| `chat` | Agentic AI chat (DeepSeek): quoted-message context, chat history with XML delimiters, image understanding (`deepseek-v4-flash-vision-exp`) and web search via You.com + **Parallel Search MCP** (up to 5 tool rounds, forced final answer) |
+| `ytdl` | YouTube / TikTok / X(Twitter) downloader with interactive format menu, search and ZIP mode. Self-updates yt-dlp daily |
+| `resume` | Transcribe + summarize voice notes AND videos (Groq Whisper + DeepSeek) |
 | `fetch` | Download media from URLs |
 | `emoji-to-gif` | Convert emojis to animated GIFs |
-| `audio_editor` | Basic audio editing tools |
+| `audio_editor` | Audio editing (convert, trim, waveform); accepts videos too (extracts audio) |
+| `github` | Sends the project repo link (`.git`, `.github`, `.repo`) |
 | `perfil` | View/profile management |
 | `tasas` | Exchange rates & currency conversion |
-| `resume` | URL content summarizer |
-| `cordial` | Friendly greeting automation |
-| `bal` | Balance/info checker |
+| `cordial` | Replaces rude words in a quoted audio with polite TTS |
+| `bal` | DeepSeek API balance checker |
 | `help` | Auto-generated help menu (uses AI to catalog commands) |
-| `ft` | File transfer utilities |
+| `ft` | Sticker → photo converter |
 | `debug-info` / `debug-pp` | Debugging tools |
-| `looger` | Internal logging utilities |
+| `looger` | Colored console message logger (background) |
+| `unread` | Catch-up summary of missed messages (background history) |
 
 ### Requirements
 
@@ -112,6 +115,11 @@ Create a `.env` file in the root directory if any addon requires API keys:
 ```env
 # Example
 DEEPSEEK_API_KEY=your_key_here
+YOU_API_KEY=your_key_here
+
+# Optional — Parallel Search MCP works without a key (free tier).
+# Only add it for higher rate limits: https://platform.parallel.ai
+PARALLEL_API_KEY=
 ```
 
 ### Project structure
@@ -172,22 +180,25 @@ module.exports = { commands, handler };
 
 | Addon | Descripción |
 |---|---|
-| `stickers` | Convertir imágenes/videos a stickers de WhatsApp |
+| `stickers` | Convertir imágenes/videos/GIFs a stickers + modo colección `.st a` (envía varios archivos y cada uno se vuelve sticker) |
 | `trans` | Traducir mensajes de texto |
 | `cita` | Generar imágenes de citas con diseño elegante |
-| `chat` | Chat con IA usando APIs (DeepSeek, etc.) |
+| `chat` | Chat IA agéntico (DeepSeek): entiende mensajes citados, historial del chat con delimitadores XML, lee imágenes (`deepseek-v4-flash-vision-exp`) y busca en la web vía You.com + **Parallel Search MCP** (hasta 5 rondas de herramientas, respuesta final obligatoria) |
+| `ytdl` | Descargador YouTube / TikTok / X(Twitter) con menú interactivo, búsqueda y modo ZIP. Auto-actualiza yt-dlp a diario |
+| `resume` | Transcribe y resume notas de voz Y videos (Groq Whisper + DeepSeek) |
 | `fetch` | Descargar contenido multimedia desde URLs |
 | `emoji-to-gif` | Convertir emojis a GIFs animados |
-| `audio_editor` | Herramientas básicas de edición de audio |
+| `audio_editor` | Edición de audio (convertir, recortar, waveform); también acepta videos (extrae el audio) |
+| `github` | Envía el link del repo (`.git`, `.github`, `.repo`) |
 | `perfil` | Gestión de perfil e información |
 | `tasas` | Tasas de cambio y conversión de divisas |
-| `resume` | Resumidor de contenido desde URLs |
-| `cordial` | Automatización de saludos cordiales |
-| `bal` | Comprobador de saldo/información |
+| `cordial` | Reemplaza groserías de un audio citado con TTS cordial sincronizado |
+| `bal` | Consulta el saldo de la API de DeepSeek |
 | `help` | Menú de ayuda autogenerado (usa IA para catalogar comandos) |
-| `ft` | Utilidades de transferencia de archivos |
+| `ft` | Convierte stickers citados de vuelta a foto |
 | `debug-info` / `debug-pp` | Herramientas de depuración |
-| `looger` | Utilidades internas de registro |
+| `looger` | Log colorido de mensajes en consola (segundo plano) |
+| `unread` | Resumen de lo que te perdiste (historial en segundo plano) |
 
 ### Requisitos
 
@@ -242,6 +253,11 @@ Crea un archivo `.env` en la raíz si algún addon requiere claves de API:
 ```env
 # Ejemplo
 DEEPSEEK_API_KEY=tu_clave_aqui
+YOU_API_KEY=tu_clave_aqui
+
+# Opcional — Parallel Search MCP funciona sin key (gratis con límites bajos).
+# Solo agrégala si quieres límites más altos: https://platform.parallel.ai
+PARALLEL_API_KEY=
 ```
 
 ### Estructura del proyecto
