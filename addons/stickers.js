@@ -10,132 +10,134 @@ const execPromise = util.promisify(exec);
 const unlinkSafe = async (p) => fs.unlink(p).catch(() => {});
 const rmDirSafe = async (p) => fs.rm(p, { recursive: true, force: true }).catch(() => {});
 
-module.exports = {
-    commands: ['st', 'sticker', 's'],
-    
-    handler: async (sock, msg, args) => {
-        const cacheDir = path.join(__dirname, '..', 'cache');
-        const ramDiskDir = '/dev/shm'; 
+// --- Estado global para sesiones de colección ---
+const sessions = {};
+let sockInstance = null;
+let listenerRegistered = false;
 
-        await fs.mkdir(cacheDir, { recursive: true }).catch(() => {});
+// --- Registro del listener global (una sola vez) ---
+function registerListener(sock) {
+    if (listenerRegistered) return;
+    listenerRegistered = true;
+    sockInstance = sock;
 
-        // Aplanar y normalizar argumentos
-        const normalizedArgs = args.flatMap(a => typeof a === 'string' ? a.toLowerCase().split(/\s+/) : []);
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+        for (const msg of messages) {
+            // Ignorar mensajes que sean comandos (los gestiona el handler)
+            const text = msg.message?.extendedTextMessage?.text || '';
+            const isCommand = text.startsWith('.s') || text.startsWith('!st') || text.startsWith('.sticker');
+            if (isCommand) continue;
 
-        let isCrop = normalizedArgs.includes('crop') || normalizedArgs.includes('c');
-        const isReverse = normalizedArgs.includes('reverse') || normalizedArgs.includes('r');
-        
-        let mode = 'fluid'; 
-        for (const arg of normalizedArgs) {
-            if (arg === 'h' || arg === 'high') { mode = 'high'; break; }
-            if (arg === 'f' || arg === 'fluid') { mode = 'fluid'; break; }
-        }
+            const jid = msg.key.remoteJid;
+            const session = sessions[jid];
+            if (!session || !session.isActive) continue;
 
-        let shapeMode = 'none';
-        for (const arg of normalizedArgs) {
-            if (arg === 's' || arg === 'spherical') { shapeMode = 'spherical'; break; }
-            if (arg === 'b' || arg === 'border') { shapeMode = 'border'; break; }
-        }
+            // Determinar si el mensaje contiene medio
+            let mediaBuffer = null;
+            let mimetype = null;
+            const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
 
-        if (shapeMode === 'spherical') {
-            isCrop = true;
-        }
-
-        const contextInfo = msg.message?.extendedTextMessage?.contextInfo || {};
-        const quotedMsg = contextInfo.quotedMessage;
-
-        const isViewOnce =
-            msg.message?.imageMessage?.viewOnce === true ||
-            msg.message?.videoMessage?.viewOnce === true ||
-            quotedMsg?.imageMessage?.viewOnce === true ||
-            quotedMsg?.videoMessage?.viewOnce === true ||
-            msg.message?.viewOnceMessage ||
-            msg.message?.viewOnceMessageV2 ||
-            quotedMsg?.viewOnceMessage ||
-            quotedMsg?.viewOnceMessageV2;
-
-        if (isViewOnce) {
-            await sock.sendMessage(msg.key.remoteJid, { react: { text: '🚫', key: msg.key } });
-            return;
-        }
-
-        const jid = msg.key.remoteJid;
-        await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
-
-        let mediaBuffer = null;
-        let mimetype = null;
-        let isAnimatedSticker = false;
-
-        if (msg.message.imageMessage || msg.message.videoMessage || msg.message.documentMessage || msg.message.stickerMessage) {
-            mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
-            mimetype = msg.message.imageMessage?.mimetype ||
-                       msg.message.videoMessage?.mimetype ||
-                       msg.message.documentMessage?.mimetype ||
-                       msg.message.stickerMessage?.mimetype;
-            isAnimatedSticker = msg.message.stickerMessage?.isAnimated || false;
-        } else if (quotedMsg) {
-            if (quotedMsg.imageMessage || quotedMsg.videoMessage || quotedMsg.documentMessage || quotedMsg.stickerMessage) {
-                const mockMsg = { 
-                    key: {
-                        remoteJid: msg.key.remoteJid,
-                        id: contextInfo.stanzaId,
-                        participant: contextInfo.participant
-                    },
-                    message: quotedMsg 
-                };
-                try {
-                    mediaBuffer = await downloadMediaMessage(mockMsg, 'buffer', {});
-                } catch (e) {
-                    console.log("Fallo al descargar mensaje citado:", e.message);
+            if (msg.message.imageMessage || msg.message.videoMessage || msg.message.documentMessage || msg.message.stickerMessage) {
+                mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
+                mimetype = msg.message.imageMessage?.mimetype ||
+                           msg.message.videoMessage?.mimetype ||
+                           msg.message.documentMessage?.mimetype ||
+                           msg.message.stickerMessage?.mimetype;
+            } else if (quotedMsg) {
+                if (quotedMsg.imageMessage || quotedMsg.videoMessage || quotedMsg.documentMessage || quotedMsg.stickerMessage) {
+                    const mockMsg = {
+                        key: {
+                            remoteJid: jid,
+                            id: msg.message.extendedTextMessage.contextInfo.stanzaId,
+                            participant: msg.message.extendedTextMessage.contextInfo.participant
+                        },
+                        message: quotedMsg
+                    };
+                    try {
+                        mediaBuffer = await downloadMediaMessage(mockMsg, 'buffer', {});
+                    } catch (e) {}
+                    mimetype = quotedMsg.imageMessage?.mimetype ||
+                               quotedMsg.videoMessage?.mimetype ||
+                               quotedMsg.documentMessage?.mimetype ||
+                               quotedMsg.stickerMessage?.mimetype;
                 }
-                
-                mimetype = quotedMsg.imageMessage?.mimetype ||
-                           quotedMsg.videoMessage?.mimetype ||
-                           quotedMsg.documentMessage?.mimetype ||
-                           quotedMsg.stickerMessage?.mimetype;
-                isAnimatedSticker = quotedMsg.stickerMessage?.isAnimated || false;
+            }
+
+            if (mediaBuffer && mediaBuffer.length > 100 && mimetype && (mimetype.startsWith('image/') || mimetype.startsWith('video/'))) {
+                // Guardamos también si es sticker animado (para saber si es entrada animada)
+                const isAnimatedSticker = msg.message?.stickerMessage?.isAnimated ||
+                                          quotedMsg?.stickerMessage?.isAnimated ||
+                                          false;
+                session.buffers.push({ buffer: mediaBuffer, mimetype, isAnimatedSticker });
+                await sock.sendMessage(jid, { react: { text: '📥', key: msg.key } });
             }
         }
+    });
+}
 
-        if (!mediaBuffer || mediaBuffer.length < 100 || !mimetype || (!mimetype.startsWith('image/') && !mimetype.startsWith('video/'))) {
-            await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
-            return;
-        }
+// --- Procesamiento de la colección: cada archivo -> un sticker ---
+async function processCollection(sock, jid, session) {
+    const buffers = session.buffers;
+    if (buffers.length === 0) {
+        await sock.sendMessage(jid, { text: '❌ No se recibieron archivos durante la colección.' });
+        return;
+    }
 
-        let finalBuffer;
-        const uniqueId = Date.now();
-        
+    const args = session.args;
+    const isCrop = args.includes('crop') || args.includes('c');
+    const isReverse = args.includes('reverse') || args.includes('r');
+    let shapeMode = 'none';
+    if (args.includes('spherical') || args.includes('s')) shapeMode = 'spherical';
+    else if (args.includes('border') || args.includes('b')) shapeMode = 'border';
+
+    let mode = 'fluid';
+    for (const arg of args) {
+        if (arg === 'h' || arg === 'high') { mode = 'high'; break; }
+        if (arg === 'f' || arg === 'fluid') { mode = 'fluid'; break; }
+    }
+
+    const cacheDir = path.join(__dirname, '..', 'cache');
+    await fs.mkdir(cacheDir, { recursive: true }).catch(() => {});
+
+    // Procesar cada archivo individualmente
+    let processed = 0;
+    for (const item of buffers) {
+        const { buffer, mimetype, isAnimatedSticker } = item;
+        const uniqueId = Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+
         const isGif = mimetype === 'image/gif';
         const isVideo = mimetype.startsWith('video/');
         const isAnimatedInput = isGif || isVideo || isAnimatedSticker;
 
         try {
+            let finalBuffer;
             if (!isAnimatedInput) {
                 const ext = mimetype.includes('webp') ? 'webp' : 'jpg';
-                finalBuffer = await processStaticToMaxUtilization(mediaBuffer, isCrop, shapeMode, cacheDir, uniqueId, 100000, ext);
+                finalBuffer = await processStaticToMaxUtilization(buffer, isCrop, shapeMode, cacheDir, uniqueId, 100000, ext);
             } else {
                 const ext = isGif ? 'gif' : (isAnimatedSticker ? 'webp' : 'mp4');
-                finalBuffer = await processAnimatedToMaxUtilization(mediaBuffer, mode, isCrop, isReverse, shapeMode, cacheDir, ramDiskDir, uniqueId, ext, 1000000, isGif);
+                finalBuffer = await processAnimatedToMaxUtilization(buffer, mode, isCrop, isReverse, shapeMode, cacheDir, '/dev/shm', uniqueId, ext, 1000000, isGif);
             }
 
             const sizeLimit = isAnimatedInput ? 1000000 : 100000;
             if (finalBuffer.length > sizeLimit) {
-                await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
-                return;
+                await sock.sendMessage(jid, { text: `⚠️ Un archivo supera el límite de tamaño (${(sizeLimit/1000).toFixed(0)} KB) y no se pudo procesar.` });
+                continue;
             }
 
-            await sock.sendMessage(jid, { sticker: finalBuffer }, { quoted: msg });
-            await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
+            await sock.sendMessage(jid, { sticker: finalBuffer });
+            processed++;
         } catch (error) {
-            console.error("Error en addon de stickers:", error);
-            await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+            console.error('Error procesando un elemento de la colección:', error);
+            await sock.sendMessage(jid, { text: '❌ Error al procesar uno de los archivos.' });
         }
     }
-};
 
-// --- FUNCIONES CORE ---
+    await sock.sendMessage(jid, { text: `✅ Colección completada. Se generaron ${processed} stickers.` });
+}
 
-// Cadenas de Filtros Dinámicas (W y H representan las dimensiones reales del marco en ese punto exacto)
+// --- Funciones originales (sin modificar) ---
+
 function getFilterChain(isCrop, shapeMode) {
     const rgb = `r='p(X,Y)':g='p(X,Y)':b='p(X,Y)'`;
     let shape = '';
@@ -150,10 +152,8 @@ function getFilterChain(isCrop, shapeMode) {
     }
 
     if (isCrop) {
-        // En crop, aplicamos la forma después del corte a 512x512
         return `scale='max(512,iw*512/ih)':'max(512,ih*512/iw)',format=rgba,crop=512:512${shape}`;
     } else {
-        // Si NO es crop (ej: 16:9), aplicamos la forma a su ratio original ANTES del padding para no redondear transparencia
         return `scale=512:512:force_original_aspect_ratio=decrease,format=rgba${shape},pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
     }
 }
@@ -181,7 +181,6 @@ async function processAnimatedToMaxUtilization(buffer, mode, isCrop, isReverse, 
         try {
             await new Promise((resolve, reject) => {
                 const command = ffmpeg(inputPath);
-                // Intento 1: Forzar el decodificador oficial de WebP Animado en FFmpeg
                 if (ext === 'webp') {
                     command.inputOptions(['-vcodec', 'libwebp_anim']);
                 }
@@ -197,18 +196,11 @@ async function processAnimatedToMaxUtilization(buffer, mode, isCrop, isReverse, 
                 .on('error', reject);
             });
         } catch (ffmpegError) {
-            // Intento 2: "Fallback Glorioso" con ImageMagick
-            // Si WhatsApp manda un WebP tan asqueroso que FFmpeg explota, usamos ImageMagick (convert)
-            // para limpiarlo y extraer los frames, y LUEGO se lo damos a FFmpeg.
             if (ext === 'webp') {
                 console.log(`[Stickers] FFmpeg colapsó con un WebP de WhatsApp. Usando escudo ImageMagick...`);
                 const rawDir = path.join(ramDir, `raw_${uniqueId}`);
                 await fs.mkdir(rawDir, { recursive: true });
-                
-                // Extraemos frames puros sin filtros
                 await execPromise(`convert "${inputPath}" -coalesce "${path.join(rawDir, 'raw_%04d.png')}"`);
-                
-                // Pasamos los frames puros por nuestro motor matemático de FFmpeg
                 await new Promise((resolve, reject) => {
                     ffmpeg(path.join(rawDir, 'raw_%04d.png'))
                         .inputOptions([`-framerate`, `${sourceFps}`])
@@ -222,48 +214,40 @@ async function processAnimatedToMaxUtilization(buffer, mode, isCrop, isReverse, 
                         .on('end', resolve)
                         .on('error', reject);
                 });
-                
                 await rmDirSafe(rawDir);
             } else {
-                throw ffmpegError; // Si no es WebP, fue otro error real
+                throw ffmpegError;
             }
         }
 
         if (isReverse) {
             const frames = (await fs.readdir(framesRamDir)).filter(f => f.startsWith('frame_')).sort();
             const totalFrames = frames.length;
-            
             if (totalFrames > 0) {
                 const mappedFrames = [];
                 let currentSourceFrame = 0;
-                
                 while (currentSourceFrame < totalFrames - 1) {
                     mappedFrames.push(Math.round(currentSourceFrame));
                     let progress = currentSourceFrame / totalFrames;
                     let speed = 1.0;
-                    
                     if (progress <= 0.25) {
-                        let t = progress / 0.25; 
-                        speed = 0.6 + 0.4 * Math.sin(t * Math.PI / 2); 
+                        let t = progress / 0.25;
+                        speed = 0.6 + 0.4 * Math.sin(t * Math.PI / 2);
                     } else if (progress >= 0.75) {
                         let t = (progress - 0.75) / 0.25;
-                        speed = 1.0 + 0.4 * (1 - Math.cos(t * Math.PI / 2)); 
+                        speed = 1.0 + 0.4 * (1 - Math.cos(t * Math.PI / 2));
                     }
                     currentSourceFrame += speed;
                 }
-                
                 if (mappedFrames[mappedFrames.length - 1] !== totalFrames - 1) {
                     mappedFrames.push(totalFrames - 1);
                 }
-
                 const finalSequence = [...mappedFrames, ...mappedFrames.slice(0, -1).reverse()];
-                
                 for (let i = 0; i < finalSequence.length; i++) {
                     const sourceFrame = frames[finalSequence[i]];
                     const targetName = `loop_${String(i + 1).padStart(4, '0')}.png`;
                     await fs.copyFile(path.join(framesRamDir, sourceFrame), path.join(framesRamDir, targetName));
                 }
-                
                 for (const frame of frames) {
                     await unlinkSafe(path.join(framesRamDir, frame));
                 }
@@ -343,7 +327,7 @@ async function processStaticToMaxUtilization(buffer, isCrop, shapeMode, diskDir,
                 .inputOptions(['-err_detect', 'ignore_err'])
                 .outputOptions([
                     '-vcodec libwebp', '-lossless 0', `-q:v ${q}`,
-                    '-compression_level 6', '-an', 
+                    '-compression_level 6', '-an',
                     `-vf`, `${filterChain}`
                 ])
                 .save(outputPath).on('end', resolve).on('error', reject);
@@ -401,3 +385,166 @@ function getDurationAndFps(filePath) {
         });
     });
 }
+
+// --- EXPORTACIÓN DEL MÓDULO (handler modificado para soportar 'a') ---
+
+module.exports = {
+    commands: ['st', 'sticker', 's'],
+
+    handler: async (sock, msg, args) => {
+        // Registrar el listener global si no existe
+        if (!listenerRegistered) {
+            registerListener(sock);
+        }
+
+        const cacheDir = path.join(__dirname, '..', 'cache');
+        await fs.mkdir(cacheDir, { recursive: true }).catch(() => {});
+
+        // Aplanar y normalizar argumentos
+        const normalizedArgs = args.flatMap(a => typeof a === 'string' ? a.toLowerCase().split(/\s+/) : []);
+
+        // --- DETECCIÓN DEL FLAG 'a' (colección) ---
+        const isCollection = normalizedArgs.includes('a');
+        const jid = msg.key.remoteJid;
+
+        if (isCollection) {
+            // Si ya hay sesión, reiniciar
+            if (sessions[jid]) {
+                clearTimeout(sessions[jid].timeout);
+                delete sessions[jid];
+            }
+
+            // Argumentos sin 'a'
+            const argsWithoutA = normalizedArgs.filter(arg => arg !== 'a');
+
+            // Crear nueva sesión
+            const session = {
+                buffers: [],
+                args: argsWithoutA,
+                isActive: true,
+                timeout: setTimeout(async () => {
+                    session.isActive = false;
+                    await processCollection(sock, jid, session);
+                    delete sessions[jid];
+                }, 60000) // 60 segundos
+            };
+            sessions[jid] = session;
+
+            await sock.sendMessage(jid, { text: '📦 Modo colección activado. Envíame imágenes, vídeos o stickers durante el próximo minuto. Cada archivo se convertirá en un sticker individual con los filtros indicados.' }, { quoted: msg });
+            await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
+            return; // No procesar más este mensaje
+        }
+
+        // --- COMPORTAMIENTO NORMAL (sin colección) ---
+        // Si hay sesión activa, pero el mensaje actual es un comando sin 'a', se procesa normalmente
+        // y no interfiere con la sesión.
+
+        let isCrop = normalizedArgs.includes('crop') || normalizedArgs.includes('c');
+        const isReverse = normalizedArgs.includes('reverse') || normalizedArgs.includes('r');
+
+        let mode = 'fluid';
+        for (const arg of normalizedArgs) {
+            if (arg === 'h' || arg === 'high') { mode = 'high'; break; }
+            if (arg === 'f' || arg === 'fluid') { mode = 'fluid'; break; }
+        }
+
+        let shapeMode = 'none';
+        for (const arg of normalizedArgs) {
+            if (arg === 's' || arg === 'spherical') { shapeMode = 'spherical'; break; }
+            if (arg === 'b' || arg === 'border') { shapeMode = 'border'; break; }
+        }
+
+        if (shapeMode === 'spherical') {
+            isCrop = true;
+        }
+
+        const contextInfo = msg.message?.extendedTextMessage?.contextInfo || {};
+        const quotedMsg = contextInfo.quotedMessage;
+
+        const isViewOnce =
+            msg.message?.imageMessage?.viewOnce === true ||
+            msg.message?.videoMessage?.viewOnce === true ||
+            quotedMsg?.imageMessage?.viewOnce === true ||
+            quotedMsg?.videoMessage?.viewOnce === true ||
+            msg.message?.viewOnceMessage ||
+            msg.message?.viewOnceMessageV2 ||
+            quotedMsg?.viewOnceMessage ||
+            quotedMsg?.viewOnceMessageV2;
+
+        if (isViewOnce) {
+            await sock.sendMessage(jid, { react: { text: '🚫', key: msg.key } });
+            return;
+        }
+
+        await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
+
+        let mediaBuffer = null;
+        let mimetype = null;
+        let isAnimatedSticker = false;
+
+        if (msg.message.imageMessage || msg.message.videoMessage || msg.message.documentMessage || msg.message.stickerMessage) {
+            mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
+            mimetype = msg.message.imageMessage?.mimetype ||
+                       msg.message.videoMessage?.mimetype ||
+                       msg.message.documentMessage?.mimetype ||
+                       msg.message.stickerMessage?.mimetype;
+            isAnimatedSticker = msg.message.stickerMessage?.isAnimated || false;
+        } else if (quotedMsg) {
+            if (quotedMsg.imageMessage || quotedMsg.videoMessage || quotedMsg.documentMessage || quotedMsg.stickerMessage) {
+                const mockMsg = {
+                    key: {
+                        remoteJid: msg.key.remoteJid,
+                        id: contextInfo.stanzaId,
+                        participant: contextInfo.participant
+                    },
+                    message: quotedMsg
+                };
+                try {
+                    mediaBuffer = await downloadMediaMessage(mockMsg, 'buffer', {});
+                } catch (e) {
+                    console.log("Fallo al descargar mensaje citado:", e.message);
+                }
+
+                mimetype = quotedMsg.imageMessage?.mimetype ||
+                           quotedMsg.videoMessage?.mimetype ||
+                           quotedMsg.documentMessage?.mimetype ||
+                           quotedMsg.stickerMessage?.mimetype;
+                isAnimatedSticker = quotedMsg.stickerMessage?.isAnimated || false;
+            }
+        }
+
+        if (!mediaBuffer || mediaBuffer.length < 100 || !mimetype || (!mimetype.startsWith('image/') && !mimetype.startsWith('video/'))) {
+            await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
+            return;
+        }
+
+        let finalBuffer;
+        const uniqueId = Date.now();
+
+        const isGif = mimetype === 'image/gif';
+        const isVideo = mimetype.startsWith('video/');
+        const isAnimatedInput = isGif || isVideo || isAnimatedSticker;
+
+        try {
+            if (!isAnimatedInput) {
+                const ext = mimetype.includes('webp') ? 'webp' : 'jpg';
+                finalBuffer = await processStaticToMaxUtilization(mediaBuffer, isCrop, shapeMode, cacheDir, uniqueId, 100000, ext);
+            } else {
+                const ext = isGif ? 'gif' : (isAnimatedSticker ? 'webp' : 'mp4');
+                finalBuffer = await processAnimatedToMaxUtilization(mediaBuffer, mode, isCrop, isReverse, shapeMode, cacheDir, '/dev/shm', uniqueId, ext, 1000000, isGif);
+            }
+
+            const sizeLimit = isAnimatedInput ? 1000000 : 100000;
+            if (finalBuffer.length > sizeLimit) {
+                await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+                return;
+            }
+
+            await sock.sendMessage(jid, { sticker: finalBuffer }, { quoted: msg });
+            await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
+        } catch (error) {
+            console.error("Error en addon de stickers:", error);
+            await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
+        }
+    }
+};

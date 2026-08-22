@@ -681,10 +681,10 @@ module.exports = {
                 console.log('📹 ytdl: uso sin args — mostrando ayuda');
                 await sock.sendMessage(jid, {
                     text: [
-                        '📹 *YouTube Downloader*',
+                        '📹 *YouTube / TikTok / X (Twitter) Downloader*',
                         '',
                         'Uso:',
-                        '  `!ytdl <url>` — Lista resoluciones disponibles',
+                        '  `!ytdl <url>` — Lista resoluciones disponibles (YouTube, TikTok, X/Twitter, etc.)',
                         '  `!ytdl <núm>` — Descarga la opción seleccionada',
                         '  `!ytdl cancel` — Cancela la descarga actual',
                         '  `!ytdl c <url>` — Descarga + comprime en ZIP',
@@ -693,6 +693,8 @@ module.exports = {
                         '',
                         'Ejemplos:',
                         '  `!ytdl https://youtube.com/watch?v=xxx`',
+                        '  `!ytdl https://www.tiktok.com/@user/video/xxx`',
+                        '  `!ytdl https://x.com/user/status/xxx`',
                         '  `!ytdl 3`  (selecciona la opción 3)',
                         '  `!ytdl c https://youtu.be/xxx`  (comprimido)',
                         '  `!ytdl curso de python`  (búsqueda)',
@@ -702,15 +704,13 @@ module.exports = {
                 return;
             }
 
-            // Si no parece URL de YouTube → tratar como búsqueda
+            // Si NO es una URL directa (http/https) → tratar como búsqueda de YouTube.
+            // Cualquier enlace directo (YouTube, TikTok, X/Twitter, etc.) se descarga vía yt-dlp.
             const urlLower = url.toLowerCase().trim();
             const startsWithHttp = urlLower.startsWith('http://') || urlLower.startsWith('https://');
-            const isYoutubeUrl = startsWithHttp && (
-                urlLower.includes('youtube.com') || urlLower.includes('youtu.be') ||
-                urlLower.includes('m.youtube.com') || urlLower.includes('youtube-nocookie.com')
-            );
+            const isDirectUrl = startsWithHttp;
 
-            if (!isYoutubeUrl) {
+            if (!isDirectUrl) {
                 console.log(`📹 ytdl: buscando: "${url}"`);
                 await sock.sendMessage(jid, { react: { text: '🔍', key: msg.key } });
 

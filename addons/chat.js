@@ -139,7 +139,7 @@ Misión actual: Asiste al usuario resolviendo su consulta de la manera más efic
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        model: 'deepseek-chat',
+                        model: 'deepseek-v4-flash',
                         messages: messages,
                         tools: tools,
                         tool_choice: 'auto'

@@ -1,5 +1,14 @@
 // addons/resu.js
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
+const { execFile } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { promisify } = require('util');
+const writeFile = promisify(fs.writeFile);
+const readFile = promisify(fs.readFile);
+const unlink = promisify(fs.unlink);
+const execFilePromise = promisify(execFile);
 
 module.exports = {
   commands: ['resu'],
@@ -9,29 +18,84 @@ module.exports = {
 
     const isAudio = msg.message?.audioMessage;
     const isQuotedAudio = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;
+    const isVideo = msg.message?.videoMessage;
+    const isQuotedVideo = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.videoMessage;
 
-    if (!isAudio && !isQuotedAudio) {
-      // Error silencioso: indica que falta el audio
+    if (!isAudio && !isQuotedAudio && !isVideo && !isQuotedVideo) {
       await sock.sendMessage(jid, { react: { text: '❓', key: msg.key } });
       return;
     }
 
-    const audioMessage = isAudio ? msg.message.audioMessage : msg.message.extendedTextMessage.contextInfo.quotedMessage.audioMessage;
-
     try {
       await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
 
-      // 1. Descargar el buffer del audio
-      const stream = await downloadContentFromMessage(audioMessage, 'audio');
-      let buffer = Buffer.from([]);
-      for await (const chunk of stream) {
-        buffer = Buffer.concat([buffer, chunk]);
+      let buffer, audioBlob, mimeType;
+
+      if (isAudio || isQuotedAudio) {
+        // --- AUDIO (existente) ---
+        const audioMessage = isAudio ? msg.message.audioMessage : msg.message.extendedTextMessage.contextInfo.quotedMessage.audioMessage;
+        const stream = await downloadContentFromMessage(audioMessage, 'audio');
+        buffer = Buffer.from([]);
+        for await (const chunk of stream) {
+          buffer = Buffer.concat([buffer, chunk]);
+        }
+        audioBlob = new Blob([buffer], { type: 'audio/ogg' });
+      } else {
+        // --- VIDEO: descargar y extraer audio con ffmpeg ---
+        const videoMessage = isVideo ? msg.message.videoMessage : msg.message.extendedTextMessage.contextInfo.quotedMessage.videoMessage;
+        const stream = await downloadContentFromMessage(videoMessage, 'video');
+        buffer = Buffer.from([]);
+        for await (const chunk of stream) {
+          buffer = Buffer.concat([buffer, chunk]);
+        }
+
+        // Guardar el vídeo en un archivo temporal
+        const tmpDir = os.tmpdir();
+        const inputPath = path.join(tmpDir, `video_${Date.now()}.mp4`);
+        const outputPath = path.join(tmpDir, `audio_${Date.now()}.mp3`);
+
+        await writeFile(inputPath, buffer);
+
+        // Extraer audio con ffmpeg
+        try {
+          await execFilePromise('ffmpeg', [
+            '-i', inputPath,
+            '-vn',               // sin video
+            '-acodec', 'libmp3lame',
+            '-q:a', '2',         // calidad
+            '-y',                // sobrescribir
+            outputPath
+          ]);
+        } catch (ffmpegErr) {
+          // Limpiar archivos temporales
+          await unlink(inputPath).catch(() => {});
+          throw new Error('Error al extraer el audio del video con ffmpeg');
+        }
+
+        // Leer el audio resultante
+        let audioBuffer;
+        try {
+          audioBuffer = await readFile(outputPath);
+        } catch (readErr) {
+          await unlink(inputPath).catch(() => {});
+          await unlink(outputPath).catch(() => {});
+          throw new Error('El archivo de audio extraído no pudo ser leído');
+        }
+
+        // Limpiar temporales
+        await unlink(inputPath).catch(() => {});
+        await unlink(outputPath).catch(() => {});
+
+        if (audioBuffer.length === 0) {
+          throw new Error('El video no contiene pista de audio');
+        }
+
+        audioBlob = new Blob([audioBuffer], { type: 'audio/mpeg' });
       }
 
-      // 2. Transcripción con Groq
-      const blob = new Blob([buffer], { type: 'audio/ogg' });
+      // --- Transcripción con Groq (igual) ---
       const formData = new FormData();
-      formData.append('file', blob, 'audio.ogg');
+      formData.append('file', audioBlob, isVideo || isQuotedVideo ? 'audio.mp3' : 'audio.ogg');
       formData.append('model', 'whisper-large-v3');
       formData.append('response_format', 'json');
 
@@ -48,14 +112,13 @@ module.exports = {
 
       if (!transcription) throw new Error('Groq no devolvió texto.');
 
-      // 3. Prompt de DeepSeek mejorado para forzar el idioma de origen
+      // --- Resumen con DeepSeek (igual) ---
       let systemInstruction = 'Eres un asistente experto en síntesis. Tu única tarea es leer la transcripción proporcionada y resumir su mensaje principal en exactamente UNA sola oración. Es estrictamente necesario que el resumen generado esté en el mismo idioma en el que está escrita la transcripción original. No añadas introducciones, viñetas ni comentarios extra.';
-      
+
       if (userPrompt) {
         systemInstruction += ` Adicionalmente, el usuario ha solicitado que apliques esta condición/enfoque a tu resumen: "${userPrompt}".`;
       }
 
-      // 4. Procesamiento con DeepSeek
       const dsRes = await fetch('https://api.deepseek.com/chat/completions', {
         method: 'POST',
         headers: {
@@ -63,7 +126,7 @@ module.exports = {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'deepseek-v4-flash', 
+          model: 'deepseek-v4-flash',
           messages: [
             { role: 'system', content: systemInstruction },
             { role: 'user', content: transcription }
@@ -81,8 +144,7 @@ module.exports = {
 
     } catch (err) {
       console.error('Error en addon .resu:', err.message);
-      // Falla en silencio con una reacción
       await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
     }
   }
-};
+}
