@@ -529,6 +529,38 @@ function scheduleYtDlpUpdates() {
     }, 60 * 1000).unref();
 }
 
+// ─── Barredor de temporales huérfanos ────────────────────────────────────
+// Si el proceso muere a mitad de descarga, el finally no corre y los videos
+// quedan en /tmp/ytdl. Este sweep borra todo lo viejo al arrancar y cada hora.
+const TMP_SWEEP_INTERVAL = 60 * 60 * 1000;      // cada 1 hora
+const TMP_MAX_AGE_MS = 3 * 60 * 60 * 1000;      // vida máxima: 3 horas
+
+async function sweepTmpBase() {
+    try {
+        await fs.ensureDir(TMP_BASE);
+        const entries = await fs.readdir(TMP_BASE);
+        const now = Date.now();
+        let freed = 0;
+        for (const entry of entries) {
+            const full = path.join(TMP_BASE, entry);
+            const stat = await fs.stat(full).catch(() => null);
+            if (!stat) continue;
+            if (now - stat.mtimeMs > TMP_MAX_AGE_MS) {
+                freed += stat.size || 0;
+                await fs.remove(full).catch(() => {});
+            }
+        }
+        if (freed > 0) console.log(`🧹 ytdl: sweep liberó ${fmtSize(freed)} de temporales huérfanos`);
+    } catch (e) {
+        console.warn('⚠️ ytdl: sweep de temporales falló:', e.message);
+    }
+}
+
+function scheduleTmpSweep() {
+    sweepTmpBase();
+    setInterval(sweepTmpBase, TMP_SWEEP_INTERVAL).unref();
+}
+
 // ─── Handler principal ───────────────────────────────────────────────────
 
 module.exports = {
@@ -537,6 +569,7 @@ module.exports = {
 
     init: () => {
         scheduleYtDlpUpdates();
+        scheduleTmpSweep();
     },
 
     handler: async (sock, msg, args, store) => {
