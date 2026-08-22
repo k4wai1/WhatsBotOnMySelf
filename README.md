@@ -59,6 +59,7 @@
 | `help` | Auto-generated help menu (uses AI to catalog commands) |
 | `ft` | Sticker → photo converter |
 | `debug-info` / `debug-pp` | Debugging tools |
+| `misc` | Misc commands: `.ping` (WhatsApp server latency), `.pong` (bot reaction time, self-edits with the ms) |
 | `looger` | Colored console message logger (background) |
 | `unread` | Catch-up summary of missed messages (background history) |
 
@@ -197,6 +198,7 @@ module.exports = { commands, handler };
 | `help` | Menú de ayuda autogenerado (usa IA para catalogar comandos) |
 | `ft` | Convierte stickers citados de vuelta a foto |
 | `debug-info` / `debug-pp` | Herramientas de depuración |
+| `misc` | Comandos misceláneos: `.ping` (latencia con servidores de WhatsApp), `.pong` (tiempo de reacción del bot, se auto-edita con los ms) |
 | `looger` | Log colorido de mensajes en consola (segundo plano) |
 | `unread` | Resumen de lo que te perdiste (historial en segundo plano) |
 
