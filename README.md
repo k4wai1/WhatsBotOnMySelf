@@ -60,6 +60,10 @@
 | `ft` | Sticker → photo converter |
 | `debug-info` / `debug-pp` | Debugging tools |
 | `misc` | Misc commands: `.ping` (WhatsApp server latency), `.pong` (bot reaction time, self-edits with the ms) |
+| `rem` | Persistent reminders: `.rem 30m text`, `.rem 1h45m x`, `.rem 17:30`, `.rem mañana 8am gym`, list/del/clear |
+| `voz` | Text → natural voice note via edge-tts (`.voz texto`, `.voz @es-MX-DaliaNeural texto`, `.voz voces`) |
+| `qr` | QR generator + reader: `.qr <text>` creates one; reply to an image with `.qr` to decode it |
+| `ss` | Website screenshot: `.ss example.com` → PNG (Chrome headless or lightpanda fallback) |
 | `looger` | Colored console message logger (background) |
 | `unread` | Catch-up summary of missed messages (background history) |
 
@@ -199,6 +203,10 @@ module.exports = { commands, handler };
 | `ft` | Convierte stickers citados de vuelta a foto |
 | `debug-info` / `debug-pp` | Herramientas de depuración |
 | `misc` | Comandos misceláneos: `.ping` (latencia con servidores de WhatsApp), `.pong` (tiempo de reacción del bot, se auto-edita con los ms) |
+| `rem` | Recordatorios persistentes: `.rem 30m texto`, `.rem 1h45m x`, `.rem 17:30`, `.rem mañana 8am gym`, con list/del/clear |
+| `voz` | Texto → nota de voz natural con edge-tts (`.voz texto`, `.voz @es-MX-DaliaNeural texto`, `.voz voces`) |
+| `qr` | Generador y lector de QR: `.qr <texto>` crea uno; responde a una imagen con `.qr` para leer su contenido |
+| `ss` | Captura de páginas web: `.ss example.com` → PNG (Chrome headless o lightpanda como respaldo) |
 | `looger` | Log colorido de mensajes en consola (segundo plano) |
 | `unread` | Resumen de lo que te perdiste (historial en segundo plano) |
 
