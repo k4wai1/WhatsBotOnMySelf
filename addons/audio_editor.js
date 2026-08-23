@@ -76,6 +76,24 @@ const getRealWaveform = async (audioPath) => {
     });
 };
 
+// 🎯 Normalización a formato compatible con WhatsApp (OGG/Opus 48kHz, sin video)
+const normalizeToWhatsAppAudio = (inputPath, outputPath, { startSec, durationSec } = {}) => {
+    return new Promise((resolve, reject) => {
+        let cmd = ffmpeg(inputPath)
+            .noVideo()              // crítico para entradas de video
+            .audioFrequency(48000); // estándar de WhatsApp
+
+        if (startSec !== undefined) cmd = cmd.setStartTime(startSec);
+        if (durationSec !== undefined) cmd = cmd.setDuration(durationSec);
+
+        cmd.toFormat('ogg')
+            .audioCodec('libopus')
+            .save(outputPath)
+            .on('end', resolve)
+            .on('error', reject);
+    });
+};
+
 module.exports = {
     commands: ['au'],
     handler: async (sock, msg, args, store) => {
@@ -116,15 +134,7 @@ module.exports = {
                 const asVoiceNote = subCmd === 'vn';
                 await sock.sendMessage(jid, { react: { text: '🔄', key: msg.key } });
 
-                // Procesamos Opus
-                await new Promise((resolve, reject) => {
-                    ffmpeg(rawAudioPath)
-                        .toFormat('ogg')
-                        .audioCodec('libopus')
-                        .save(processedAudioPath)
-                        .on('end', resolve)
-                        .on('error', reject);
-                });
+                await normalizeToWhatsAppAudio(rawAudioPath, processedAudioPath);
 
                 const processedBuffer = await fs.readFile(processedAudioPath);
                 
@@ -161,15 +171,9 @@ module.exports = {
 
                 await sock.sendMessage(jid, { react: { text: '✂️', key: msg.key } });
 
-                await new Promise((resolve, reject) => {
-                    ffmpeg(rawAudioPath)
-                        .setStartTime(startSec)
-                        .setDuration(endSec - startSec)
-                        .toFormat('ogg')
-                        .audioCodec('libopus')
-                        .save(processedAudioPath)
-                        .on('end', resolve)
-                        .on('error', reject);
+                await normalizeToWhatsAppAudio(rawAudioPath, processedAudioPath, {
+                    startSec,
+                    durationSec: endSec - startSec
                 });
 
                 const processedBuffer = await fs.readFile(processedAudioPath);
