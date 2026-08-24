@@ -44,28 +44,36 @@
 |---|---|
 | `stickers` | Convert images/videos/GIFs to stickers + `.st a` collection mode (send multiple files, each becomes a sticker) |
 | `trans` | Translate text messages |
+| `acortar` | Shorten long links with is.gd (`.acortar <url>`, also works quoting a message) |
 | `cita` | Generate beautiful quote images |
 | `chat` | Agentic AI chat (DeepSeek): quoted-message context, chat history with XML delimiters, image understanding (`deepseek-v4-flash-vision-exp`) and web search via You.com + **Parallel Search MCP** (up to 5 tool rounds, forced final answer) |
 | `ytdl` | YouTube / TikTok / X(Twitter) downloader with interactive format menu, search and ZIP mode. Self-updates yt-dlp daily |
 | `resume` | Transcribe + summarize voice notes AND videos (Groq Whisper + DeepSeek) |
 | `fetch` | Download media from URLs |
+| `files` | Browse the server's `files/` folder from the chat (paginated interactive sessions) |
+| `paste` | Upload typed or quoted text to paste.rs and get a permanent link (0x0.st fallback) |
 | `emoji-to-gif` | Convert emojis to animated GIFs |
+| `fx` | Image effects on quoted photos/stickers: `.fx blur\|gris\|sepia\|espejo` |
 | `audio_editor` | Audio editing (convert, trim, waveform); accepts videos too (extracts audio) |
 | `github` | Sends the project repo link (`.git`, `.github`, `.repo`) |
 | `perfil` | View/profile management |
+| `prefix` | View/change the bot's command prefixes at runtime |
 | `tasas` | Exchange rates & currency conversion |
+| `wallpaper` | Random wallpaper by keyword from wallhaven.cc (auto-compressed JPEG) |
 | `cordial` | Replaces rude words in a quoted audio with polite TTS |
 | `bal` | DeepSeek API balance checker |
-| `help` | Auto-generated help menu (uses AI to catalog commands) |
+| `help` | Auto-generated help menu (uses AI to catalog commands, auto-refreshes when addons change) |
 | `ft` | Sticker → photo converter |
 | `debug-info` / `debug-pp` | Debugging tools |
 | `misc` | Misc commands: `.ping` (WhatsApp server latency), `.pong` (bot reaction time, self-edits with the ms) |
+| `dado` | Dice roller `.dado [N]` (N-sided die) and coin flip `.moneda` |
 | `rem` | Persistent reminders: `.rem 30m text`, `.rem 1h45m x`, `.rem 17:30`, `.rem mañana 8am gym`, list/del/clear |
 | `voz` | Text → natural voice note via edge-tts (`.voz texto`, `.voz @es-MX-DaliaNeural texto`, `.voz voces`) |
 | `qr` | QR generator + reader: `.qr <text>` creates one; reply to an image with `.qr` to decode it |
 | `ss` | Website screenshot: `.ss example.com` → PNG (Chrome headless or lightpanda fallback) |
 | `looger` | Colored console message logger (background) |
 | `unread` | Catch-up summary of missed messages (background history) |
+| `img` | AI vision: describe/analyze a photo sent or quoted in the chat |
 
 ### Requirements
 
@@ -187,28 +195,36 @@ module.exports = { commands, handler };
 |---|---|
 | `stickers` | Convertir imágenes/videos/GIFs a stickers + modo colección `.st a` (envía varios archivos y cada uno se vuelve sticker) |
 | `trans` | Traducir mensajes de texto |
+| `acortar` | Acorta enlaces largos con is.gd (`.acortar <url>`, también funciona citando un mensaje) |
 | `cita` | Generar imágenes de citas con diseño elegante |
 | `chat` | Chat IA agéntico (DeepSeek): entiende mensajes citados, historial del chat con delimitadores XML, lee imágenes (`deepseek-v4-flash-vision-exp`) y busca en la web vía You.com + **Parallel Search MCP** (hasta 5 rondas de herramientas, respuesta final obligatoria) |
 | `ytdl` | Descargador YouTube / TikTok / X(Twitter) con menú interactivo, búsqueda y modo ZIP. Auto-actualiza yt-dlp a diario |
 | `resume` | Transcribe y resume notas de voz Y videos (Groq Whisper + DeepSeek) |
 | `fetch` | Descargar contenido multimedia desde URLs |
+| `files` | Explora la carpeta `files/` del servidor desde el chat (sesiones interactivas paginadas) |
+| `paste` | Sube texto escrito o citado a paste.rs y obtén un link permanente (respaldo 0x0.st) |
 | `emoji-to-gif` | Convertir emojis a GIFs animados |
+| `fx` | Efectos de imagen sobre fotos/stickers citados: `.fx blur\|gris\|sepia\|espejo` |
 | `audio_editor` | Edición de audio (convertir, recortar, waveform); también acepta videos (extrae el audio) |
 | `github` | Envía el link del repo (`.git`, `.github`, `.repo`) |
 | `perfil` | Gestión de perfil e información |
+| `prefix` | Ver/cambiar los prefijos de comandos del bot en caliente |
 | `tasas` | Tasas de cambio y conversión de divisas |
+| `wallpaper` | Wallpaper aleatorio por palabra clave desde wallhaven.cc (comprime a JPEG automáticamente) |
 | `cordial` | Reemplaza groserías de un audio citado con TTS cordial sincronizado |
 | `bal` | Consulta el saldo de la API de DeepSeek |
-| `help` | Menú de ayuda autogenerado (usa IA para catalogar comandos) |
+| `help` | Menú de ayuda autogenerado (usa IA para catalogar comandos, se refresca solo cuando cambian los addons) |
 | `ft` | Convierte stickers citados de vuelta a foto |
 | `debug-info` / `debug-pp` | Herramientas de depuración |
 | `misc` | Comandos misceláneos: `.ping` (latencia con servidores de WhatsApp), `.pong` (tiempo de reacción del bot, se auto-edita con los ms) |
+| `dado` | Dados `.dado [N]` (dado de N caras) y moneda `.moneda` |
 | `rem` | Recordatorios persistentes: `.rem 30m texto`, `.rem 1h45m x`, `.rem 17:30`, `.rem mañana 8am gym`, con list/del/clear |
 | `voz` | Texto → nota de voz natural con edge-tts (`.voz texto`, `.voz @es-MX-DaliaNeural texto`, `.voz voces`) |
 | `qr` | Generador y lector de QR: `.qr <texto>` crea uno; responde a una imagen con `.qr` para leer su contenido |
 | `ss` | Captura de páginas web: `.ss example.com` → PNG (Chrome headless o lightpanda como respaldo) |
 | `looger` | Log colorido de mensajes en consola (segundo plano) |
 | `unread` | Resumen de lo que te perdiste (historial en segundo plano) |
+| `img` | Visión IA: describe/analiza una foto enviada o citada en el chat |
 
 ### Requisitos
 

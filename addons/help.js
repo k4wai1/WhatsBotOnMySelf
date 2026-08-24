@@ -1,9 +1,24 @@
 // addons/help.js
 const fs = require('fs-extra');
 const path = require('path');
+const crypto = require('crypto');
 
 const CACHE_PATH = path.join(__dirname, '..', 'help_cache.json');
-let helpData = null;          // { groups: [], aliasMap: {} }
+let helpData = null;          // { groups: [], aliasMap: {}, addonsHash }
+let regenerating = null;      // promesa en curso (evita doble regeneración)
+
+// ─── Hash del estado de los addons ──────────────────────────────
+function computeAddonsHash() {
+    const files = fs.readdirSync(__dirname)
+        .filter(f => f.endsWith('.js') && f !== 'help.js')
+        .sort();
+    const hash = crypto.createHash('md5');
+    for (const f of files) {
+        const stat = fs.statSync(path.join(__dirname, f));
+        hash.update(`${f}:${stat.mtimeMs}:${stat.size}`);
+    }
+    return hash.digest('hex');
+}
 
 // ─── Carga / generación del caché ───────────────────────────────
 async function loadCache() {
@@ -17,6 +32,12 @@ async function loadCache() {
 
 async function generateCache(force = false) {
     if (helpData && !force) return helpData;
+    if (!process.env.DEEPSEEK_API_KEY) {
+        throw new Error('DEEPSEEK_API_KEY no está configurada en .env');
+    }
+
+    const addonsHash = computeAddonsHash();
+    if (helpData && helpData.addonsHash === addonsHash && !force) return helpData;
 
     const addonsDir = __dirname;
     const files = fs.readdirSync(addonsDir).filter(f => f.endsWith('.js') && f !== 'help.js');
@@ -78,9 +99,25 @@ Si un addon no tiene comandos, responde []. No incluyas bloques de markdown.`
         }
     }
 
-    helpData = { generatedAt: Date.now(), groups, aliasMap };
+    helpData = { generatedAt: Date.now(), addonsHash, groups, aliasMap };
     await fs.writeJson(CACHE_PATH, helpData);
     return helpData;
+}
+
+// Regenera en segundo plano si los addons cambiaron desde la última vez
+function regenerateIfStale() {
+    if (regenerating) return regenerating;
+    if (!process.env.DEEPSEEK_API_KEY) return null;
+    try {
+        const current = computeAddonsHash();
+        if (helpData && helpData.addonsHash === current) return null;
+    } catch (_) {}
+    console.log('📝 Cambios detectados en addons — regenerando caché de ayuda...');
+    regenerating = generateCache(true)
+        .then(() => console.log('✅ Caché de ayuda actualizado.'))
+        .catch(e => console.error('❌ Error regenerando ayuda:', e.message))
+        .finally(() => { regenerating = null; });
+    return regenerating;
 }
 
 // ─── Handler principal ──────────────────────────────────────────
@@ -93,9 +130,10 @@ module.exports = {
             console.log('📝 Generando caché de ayuda con DeepSeek...');
             generateCache()
                 .then(() => console.log('✅ Caché de ayuda creada.'))
-                .catch(e => console.error('Error:', e));
+                .catch(e => console.error('❌ Error generando ayuda:', e.message));
         } else {
             await loadCache();
+            regenerateIfStale();
         }
     },
 
@@ -133,15 +171,20 @@ module.exports = {
             }
         }
 
+        // Si hay una regeneración en curso (addons cambiados), esperar para responder al día
+        if (regenerating) await regenerating.catch(() => {});
+
         const commandQuery = args[0]?.toLowerCase();
 
-        // Sin argumentos → menú con grupos
+        // Sin argumentos → menú con grupos (orden alfabético)
         if (!commandQuery) {
-            const lines = helpData.groups.map(group => {
+            const grupos = [...helpData.groups].sort((a, b) =>
+                String(a.commands?.[0] || '').localeCompare(String(b.commands?.[0] || ''), 'es'));
+            const lines = grupos.map(group => {
                 const cmdList = group.commands.map(c => `*${c}*`).join('/');
                 return `• ${cmdList}: ${group.preview}`;
             });
-            const menu = `📚 *Menú de Comandos*\n\n${lines.join('\n')}\n\n💡 Usa *.help <comando>* para detalles.\n🔄 Usa *.help update* para regenerar la ayuda.`;
+            const menu = `📚 *Menú de Comandos* (${lines.length})\n\n${lines.join('\n')}\n\n💡 Usa *.help <comando>* para detalles.\n🔄 Usa *.help update* para regenerar la ayuda.`;
             await sock.sendMessage(jid, { text: menu }, { quoted: msg });
             await sock.sendMessage(jid, { react: { text: '📚', key: msg.key } });
             return;
