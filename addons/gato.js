@@ -137,7 +137,7 @@ async function pantalla(game, cat, arte) {
     const texto = renderScreen(cat, arte);
     if (texto === game.lastText) return;
     try {
-        await game.sock.sendMessage(game.chatJid, { text: texto }, { edit: game.displayKey });
+        await game.sock.sendMessage(game.chatJid, { text: texto, edit: game.displayKey });
         game.lastText = texto;
     } catch (e) {}
 }
@@ -159,7 +159,7 @@ async function closeGame(gameId, razon = '/ᐠ - ˕ -マ Ⳋ n/ > Mucha inactivi
     activeGames.delete(gameId);
 
     try {
-        await game.sock.sendMessage(game.chatJid, { text: razon }, { edit: game.displayKey });
+        await game.sock.sendMessage(game.chatJid, { text: razon, edit: game.displayKey });
     } catch (e) {}
 }
 
