@@ -1,0 +1,12 @@
+{
+  "182790133969133": {
+    "name": "Michi",
+    "scene": "Cocina",
+    "lastUpdate": 1787595263694,
+    "stats": {
+      "hambre": 100,
+      "energia": 100,
+      "felicidad": 50
+    }
+  }
+}
