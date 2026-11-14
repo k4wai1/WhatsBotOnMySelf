@@ -12,13 +12,23 @@ const ensureTempDir = async (sessionId) => {
     return dir;
 };
 
+// downloadContentFromMessage hace destructuring de { mediaKey, directPath, url }:
+// hay que pasarle el NODO de media (audioMessage/videoMessage), no el contenedor.
 const downloadAudio = async (mediaMsg, type) => {
-    const stream = await downloadContentFromMessage(mediaMsg, type);
+    const node = mediaMsg?.[type === 'video' ? 'videoMessage' : 'audioMessage'] || mediaMsg;
+    const stream = await downloadContentFromMessage(node, type);
     let buffer = Buffer.from([]);
     for await (const chunk of stream) {
         buffer = Buffer.concat([buffer, chunk]);
     }
     return buffer;
+};
+
+// ¿El medio tiene información de descarga? (los ecos de audios enviados por el
+// propio bot suelen carecer de url/directPath y no son re-descargables)
+const esDescargable = (content, type) => {
+    const node = content?.[type === 'video' ? 'videoMessage' : 'audioMessage'];
+    return !!node && (!!node.url || !!node.directPath);
 };
 
 const parseTime = (str) => {
@@ -247,6 +257,15 @@ const manejarUnirMedia = async (sock, msg) => {
     const id = msg.key.id;
     if (session.usados.has(id)) return;
 
+    const mediaType = content.audioMessage ? 'audio' : 'video';
+    if (!esDescargable(content, mediaType)) {
+        await sock.sendMessage(chat, { react: { text: '🙅', key: msg.key } });
+        await sock.sendMessage(chat, {
+            text: '🚫 Ese audio lo envié yo y WhatsApp no me deja volver a descargarlo. Reenvíalo tú (o desde otro chat) y lo agrego igual.'
+        }, { quoted: msg });
+        return;
+    }
+
     if (session.audios.length >= UNIR_MAX_AUDIOS) {
         await avisoTope(session);
         return;
@@ -282,6 +301,15 @@ const manejarUnirReaccion = async (sock, msg, reaction) => {
         return;
     }
 
+    const mediaType = cacheItem.content.audioMessage ? 'audio' : 'video';
+    if (!esDescargable(cacheItem.content, mediaType)) {
+        await sock.sendMessage(chat, { react: { text: '🙅', key: msg.key } });
+        await sock.sendMessage(chat, {
+            text: '🚫 Ese audio lo envié yo y WhatsApp no me deja volver a descargarlo. Reenvíalo tú (o desde otro chat) durante el minuto y lo agrego igual.'
+        }, { quoted: msg });
+        return;
+    }
+
     const id = cacheItem.msg.key.id;
     if (session.usados.has(id)) return;
 
@@ -314,21 +342,30 @@ const finalizarUnir = async (session) => {
 
     const sessionId = crypto.randomBytes(4).toString('hex');
     const tempDir = await ensureTempDir(sessionId);
-    try {
-        // 1) Descargar todo lo recogido
-        const inputs = [];
-        for (let i = 0; i < total; i++) {
-            const item = session.audios[i];
-            const mediaType = item.content.audioMessage ? 'audio' : 'video';
-            const buffer = await downloadAudio(item.content, mediaType);
-            if (!buffer || buffer.length === 0) continue; // medio expirado: se omite
-            const rawPath = path.join(tempDir, `src_${i}.${mediaType === 'video' ? 'mp4' : 'ogg'}`);
-            await fs.writeFile(rawPath, buffer);
-            inputs.push(rawPath);
-        }
-        if (inputs.length === 0) {
-            throw new Error('todos los audios recogidos están expirados o no descargables');
-        }
+        try {
+            // 1) Descargar todo lo recogido (los no descargables se omiten)
+            const inputs = [];
+            let omitidos = 0;
+            for (let i = 0; i < total; i++) {
+                const item = session.audios[i];
+                const mediaType = item.content.audioMessage ? 'audio' : 'video';
+                try {
+                    const buffer = await downloadAudio(item.content, mediaType);
+                    if (!buffer || buffer.length === 0) { omitidos++; continue; } // medio expirado: se omite
+                    const rawPath = path.join(tempDir, `src_${inputs.length}.${mediaType === 'video' ? 'mp4' : 'ogg'}`);
+                    await fs.writeFile(rawPath, buffer);
+                    inputs.push(rawPath);
+                } catch (e) {
+                    console.warn(`⚠️ .au unir: medio ${i + 1}/${total} omitido: ${e.message}`);
+                    omitidos++;
+                }
+            }
+            if (inputs.length === 0) {
+                const causa = total === 1 && !esDescargable(session.audios[0].content, session.audios[0].content.audioMessage ? 'audio' : 'video')
+                    ? 'el audio no es re-descargable (fue enviado por el bot: reenvíalo desde otro chat y reacciona a esa copia)'
+                    : 'todos los audios recogidos están expirados o no descargables';
+                throw new Error(causa);
+            }
 
         await sock.sendMessage(chat, { react: { text: '🔗', key: session.invoker.key } });
 
@@ -353,9 +390,8 @@ const finalizarUnir = async (session) => {
         }, { quoted: session.invoker });
 
         await sock.sendMessage(chat, { react: { text: '✅', key: session.invoker.key } });
-        const omitidos = total - inputs.length;
         await sock.sendMessage(chat, {
-            text: `🔗 Audios unidos: ${inputs.length}${omitidos > 0 ? ` (${omitidos} omitidos por estar expirados)` : ''}`
+            text: `🔗 Audios unidos: ${inputs.length}${omitidos > 0 ? ` (${omitidos} omitidos: expirados o no descargables)` : ''}`
         }, { quoted: session.invoker });
 
     } catch (error) {

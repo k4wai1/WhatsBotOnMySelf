@@ -10,7 +10,7 @@ module.exports = {
     const rawText = msg.message?.conversation || 
                     msg.message?.extendedTextMessage?.text || 
                     msg.message?.audioMessage?.caption || '';
-    const commandUsed = rawText.trim().split(/\s+/)[0].toLowerCase().replace(/^[.!/]/, '');
+    const commandUsed = rawText.trim().split(/\s+/)[0].toLowerCase().replace(/^[.!,\/]/, '');
 
     const isAudio = msg.message?.audioMessage;
     const isQuotedAudio = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage;

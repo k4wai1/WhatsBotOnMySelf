@@ -1,13 +1,14 @@
 // addons/tasas.js
 module.exports = {
-  commands: ['dolar', 'euro', 'yuan', 'lira', 'rublo', 'tasas'],
+  commands: ['dolar', 'dólar', 'euro', 'yuan', 'lira', 'rublo', 'tasas'],
   handler: async (sock, msg, args) => {
     const jid = msg.key.remoteJid;
 
     // 1. Identificar qué comando específico detonó el enrutador
     // (Limpiamos cualquier prefijo para saber si pidió 'dolar', 'euro', etc.)
     const rawText = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
-    const commandUsed = rawText.trim().split(/\s+/)[0].toLowerCase().replace(/^[.!/,]/, '');
+    // Normalizamos acentos (ej. 'dólar' -> 'dolar') para que los ids internos coincidan
+    const commandUsed = rawText.trim().split(/\s+/)[0].toLowerCase().replace(/^[.!/,]/, '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
     // 2. Extraer el multiplicador
     // El router (index.js) ya extrajo el comando del array, así que el número está en args[0]

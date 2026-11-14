@@ -107,6 +107,7 @@ async function processCollection(sock, jid, session) {
     const args = session.args;
     const isCrop = args.includes('crop') || args.includes('c');
     const isReverse = args.includes('reverse') || args.includes('r');
+    const isStretch = args.includes('e') || args.includes('estirar');
     let shapeMode = 'none';
     if (args.includes('spherical') || args.includes('s')) shapeMode = 'spherical';
     else if (args.includes('border') || args.includes('b')) shapeMode = 'border';
@@ -134,10 +135,10 @@ async function processCollection(sock, jid, session) {
             let finalBuffer;
             if (!isAnimatedInput) {
                 const ext = mimetype.includes('webp') ? 'webp' : 'jpg';
-                finalBuffer = await processStaticToMaxUtilization(buffer, isCrop, shapeMode, cacheDir, uniqueId, 100000, ext);
+                finalBuffer = await processStaticToMaxUtilization(buffer, isCrop, shapeMode, cacheDir, uniqueId, 100000, ext, isStretch);
             } else {
                 const ext = isGif ? 'gif' : (isAnimatedSticker ? 'webp' : 'mp4');
-                finalBuffer = await processAnimatedToMaxUtilization(buffer, mode, isCrop, isReverse, shapeMode, cacheDir, '/dev/shm', uniqueId, ext, 1000000, isGif);
+                finalBuffer = await processAnimatedToMaxUtilization(buffer, mode, isCrop, isReverse, shapeMode, cacheDir, '/dev/shm', uniqueId, ext, 1000000, isGif, isStretch);
             }
 
             const sizeLimit = isAnimatedInput ? 1000000 : 100000;
@@ -159,7 +160,7 @@ async function processCollection(sock, jid, session) {
 
 // --- Funciones originales (sin modificar) ---
 
-function getFilterChain(isCrop, shapeMode) {
+function getFilterChain(isCrop, shapeMode, isStretch = false) {
     const rgb = `r='p(X,Y)':g='p(X,Y)':b='p(X,Y)'`;
     let shape = '';
 
@@ -172,6 +173,11 @@ function getFilterChain(isCrop, shapeMode) {
         shape = `,geq=${rgb}:a='p(X,Y)*lte(${dx}*${dx}+${dy}*${dy},${r}*${r})'`;
     }
 
+    // Flag 'e': estira la imagen a un cuadrado perfecto 1:1 deformando el lado más corto
+    if (isStretch) {
+        return `scale=512:512,format=rgba${shape}`;
+    }
+
     if (isCrop) {
         return `scale='max(512,iw*512/ih)':'max(512,ih*512/iw)',format=rgba,crop=512:512${shape}`;
     } else {
@@ -179,7 +185,7 @@ function getFilterChain(isCrop, shapeMode) {
     }
 }
 
-async function processAnimatedToMaxUtilization(buffer, mode, isCrop, isReverse, shapeMode, diskDir, ramDir, uniqueId, ext, sizeLimit, isGif) {
+async function processAnimatedToMaxUtilization(buffer, mode, isCrop, isReverse, shapeMode, diskDir, ramDir, uniqueId, ext, sizeLimit, isGif, isStretch = false) {
     const inputPath = path.join(diskDir, `in_${uniqueId}.${ext}`);
     const framesRamDir = path.join(ramDir, `rupa_frames_${uniqueId}`);
     const outputPath = path.join(diskDir, `out_${uniqueId}.webp`);
@@ -196,7 +202,7 @@ async function processAnimatedToMaxUtilization(buffer, mode, isCrop, isReverse, 
         let expectedFinalDuration = isReverse ? (trimDuration * 2) : trimDuration;
         let targetFps = calculateTargetFps(mode, expectedFinalDuration, sourceFps);
 
-        const filterChain = getFilterChain(isCrop, shapeMode);
+        const filterChain = getFilterChain(isCrop, shapeMode, isStretch);
         const extractFilters = `fps=${targetFps},${filterChain}`;
 
         try {
@@ -329,7 +335,7 @@ async function processAnimatedToMaxUtilization(buffer, mode, isCrop, isReverse, 
     }
 }
 
-async function processStaticToMaxUtilization(buffer, isCrop, shapeMode, diskDir, uniqueId, sizeLimit, ext = 'jpg') {
+async function processStaticToMaxUtilization(buffer, isCrop, shapeMode, diskDir, uniqueId, sizeLimit, ext = 'jpg', isStretch = false) {
     const inputPath = path.join(diskDir, `in_static_${uniqueId}.${ext}`);
     const outputPath = path.join(diskDir, `out_static_${uniqueId}.webp`);
 
@@ -337,7 +343,7 @@ async function processStaticToMaxUtilization(buffer, isCrop, shapeMode, diskDir,
         await fs.writeFile(inputPath, buffer);
         let targetSize = sizeLimit * 0.90;
 
-        const filterChain = getFilterChain(isCrop, shapeMode);
+        const filterChain = getFilterChain(isCrop, shapeMode, isStretch);
 
         let qMin = 10, qMax = 100, bestBuffer = null, bestDiff = Infinity;
 
@@ -466,6 +472,7 @@ module.exports = {
 
         let isCrop = normalizedArgs.includes('crop') || normalizedArgs.includes('c');
         const isReverse = normalizedArgs.includes('reverse') || normalizedArgs.includes('r');
+        const isStretch = normalizedArgs.includes('e') || normalizedArgs.includes('estirar');
 
         let mode = 'fluid';
         for (const arg of normalizedArgs) {
@@ -553,10 +560,10 @@ module.exports = {
         try {
             if (!isAnimatedInput) {
                 const ext = mimetype.includes('webp') ? 'webp' : 'jpg';
-                finalBuffer = await processStaticToMaxUtilization(mediaBuffer, isCrop, shapeMode, cacheDir, uniqueId, 100000, ext);
+                finalBuffer = await processStaticToMaxUtilization(mediaBuffer, isCrop, shapeMode, cacheDir, uniqueId, 100000, ext, isStretch);
             } else {
                 const ext = isGif ? 'gif' : (isAnimatedSticker ? 'webp' : 'mp4');
-                finalBuffer = await processAnimatedToMaxUtilization(mediaBuffer, mode, isCrop, isReverse, shapeMode, cacheDir, '/dev/shm', uniqueId, ext, 1000000, isGif);
+                finalBuffer = await processAnimatedToMaxUtilization(mediaBuffer, mode, isCrop, isReverse, shapeMode, cacheDir, '/dev/shm', uniqueId, ext, 1000000, isGif, isStretch);
             }
 
             const sizeLimit = isAnimatedInput ? 1000000 : 100000;
