@@ -4,13 +4,17 @@ const path = require('path');
 
 const CONFIG_PATH = path.join(__dirname, '..', 'assets', 'config.json');
 
+// Defaults por instancia para mantener paridad de addons entre bots:
+// la instancia de rupa (raíz con rupa.js) usa '.', el bot principal (wsbom) usa ',' '!' '/'
+const DEFAULT_PREFIXES = fs.existsSync(path.join(__dirname, '..', 'rupa.js')) ? ['.'] : [',', '!', '/'];
+
 function loadPrefixes() {
     try {
         const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
         const cfg = JSON.parse(raw);
         if (Array.isArray(cfg.prefixes) && cfg.prefixes.length) return cfg.prefixes;
     } catch (_) {}
-    return [',', '!', '/'];
+    return DEFAULT_PREFIXES;
 }
 
 function savePrefixes(list) {
@@ -80,8 +84,9 @@ async function handler(sock, msg, args) {
 
     // ── prefix default ──────────────────────────────────────────────────────
     if (sub === 'default') {
-        savePrefixes([',', '!', '/']);
-        await sock.sendMessage(jid, { text: '🔄 Prefixes restaurados: `,` `!` `/`' });
+        savePrefixes(DEFAULT_PREFIXES);
+        const pretty = DEFAULT_PREFIXES.map(p => `\`${p}\``).join(' ');
+        await sock.sendMessage(jid, { text: `🔄 Prefixes restaurados: ${pretty}` });
         return;
     }
 
