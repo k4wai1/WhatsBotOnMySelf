@@ -26,7 +26,13 @@ function getHistoryData() {
 
         // Ordenar por fecha y tomar solo los últimos 30 días
         const sorted = Object.values(uniqueData).sort((a, b) => a.date.localeCompare(b.date));
-        return sorted.slice(-30);
+
+        // Sanear valores colapsados por el bug de parseo (1.009,07 → 1.009):
+        // si un punto es <10 y la mediana del período es >100, se descarta.
+        const nums = sorted.map(d => parseFloat(d.bcv_usd)).filter(n => isFinite(n) && n > 0).sort((a, b) => a - b);
+        const mediana = nums.length ? nums[Math.floor(nums.length / 2)] : 0;
+        const limpio = mediana > 100 ? sorted.filter(d => parseFloat(d.bcv_usd) >= 10) : sorted;
+        return limpio.slice(-30);
 
     } catch (e) {
         console.error('[CHART] Error leyendo historial:', e.message);

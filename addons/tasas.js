@@ -1,4 +1,25 @@
 // addons/tasas.js
+// Convierte cifras del BCV (es-VE: 1.009,07172979) o en-US (1,009.07) a float.
+// Sin esto parseFloat("1.009,07") devuelve 1.009 y colapsa las tasas >1000.
+function parseVes(raw) {
+  if (typeof raw === 'number') return raw;
+  let s = String(raw == null ? '' : raw).replace(/[^\d.,]/g, '');
+  if (!s) return NaN;
+  const lastComma = s.lastIndexOf(',');
+  const lastDot = s.lastIndexOf('.');
+  if (lastComma !== -1 && lastDot !== -1) {
+    s = lastComma > lastDot
+      ? s.replace(/\./g, '').replace(',', '.')
+      : s.replace(/,/g, '');
+  } else if (lastComma !== -1) {
+    s = s.replace(',', '.');
+  } else if (lastDot !== -1) {
+    const partes = s.split('.');
+    if (partes.length > 2 || partes[1].length === 3) s = partes.join('');
+  }
+  return parseFloat(s);
+}
+
 module.exports = {
   commands: ['dolar', 'dólar', 'euro', 'yuan', 'lira', 'rublo', 'tasas'],
   handler: async (sock, msg, args) => {
@@ -67,7 +88,7 @@ module.exports = {
         if (multiplicador !== 1) respuesta += `🧮 *Equivalencia para:* ${multiplicador}\n\n`;
 
         for (const [id, data] of Object.entries(valores)) {
-          const precioNum = parseFloat(data.valor.replace(',', '.'));
+          const precioNum = parseVes(data.valor);
           const total = precioNum * multiplicador;
           respuesta += `• ${data.nombre}: ${total.toFixed(2)} VES\n`;
         }
@@ -87,7 +108,7 @@ module.exports = {
         if (commandUsed === id) {
           if (!valores[id]) throw new Error(`El valor de ${info.codigo} no está disponible en la página.`);
 
-          const precioBCV = parseFloat(valores[id].valor.replace(',', '.'));
+          const precioBCV = parseVes(valores[id].valor);
           const totalBCV = precioBCV * multiplicador;
 
           if (id === 'dolar') {

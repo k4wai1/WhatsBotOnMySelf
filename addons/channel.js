@@ -6,6 +6,27 @@ const fs = require('fs');
 const path = require('path');
 const chartGenerator = require('./chart_generator');
 
+// Convierte cifras del BCV (es-VE: 1.009,07172979) o en-US (1,009.07) a float.
+// Sin esto parseFloat("1.009,07") devuelve 1.009 y colapsa las tasas >1000.
+function parseVes(raw) {
+    if (typeof raw === 'number') return raw;
+    let s = String(raw == null ? '' : raw).replace(/[^\d.,]/g, '');
+    if (!s) return NaN;
+    const lastComma = s.lastIndexOf(',');
+    const lastDot = s.lastIndexOf('.');
+    if (lastComma !== -1 && lastDot !== -1) {
+        s = lastComma > lastDot
+            ? s.replace(/\./g, '').replace(',', '.')
+            : s.replace(/,/g, '');
+    } else if (lastComma !== -1) {
+        s = s.replace(',', '.');
+    } else if (lastDot !== -1) {
+        const partes = s.split('.');
+        if (partes.length > 2 || partes[1].length === 3) s = partes.join('');
+    }
+    return parseFloat(s);
+}
+
 // --- CONFIGURACIÓN ---
 const TARGET_CHANNEL_ID = process.env.NEWS_CHANNEL_ID || '';
 const STATS_DIR = path.join(__dirname, '..', 'assets', 'statistics');
@@ -75,7 +96,7 @@ async function obtenerMensajeTasas() {
             if (match && match[1]) {
                 const val = match[1].replace(/\s/g, '');
                 valores[id] = { valor: val, ...info };
-                if (id === 'dolar') bcvUSD = parseFloat(val.replace(',', '.'));
+                if (id === 'dolar') bcvUSD = parseVes(val);
             }
         }
 
@@ -99,7 +120,7 @@ async function obtenerMensajeTasas() {
             const dato = valores[key];
             mensaje += `🌍 *${dato.nombre} (${dato.codigo})*\n🏛 BCV: ${dato.valor}\n`;
             if (precioUSDT) {
-                const pBCV = parseFloat(dato.valor.replace(',', '.'));
+                const pBCV = parseVes(dato.valor);
                 mensaje += `🔸 Binance (${key === 'euro' ? 'Ref. USDT' : 'USDT'}): ${precioUSDT.toFixed(2)}\n`;
                 mensaje += `📊 Brecha: ${(((precioUSDT - pBCV) / pBCV) * 100).toFixed(2)}%\n\n`;
             } else {
