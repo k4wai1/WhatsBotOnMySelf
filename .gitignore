@@ -45,3 +45,10 @@ files/*
 .DS_Store
 Thumbs.db
 *.log
+
+# ─── Bot en Go (go-bot/) ───
+go-bot/whatsbot
+go-bot/whatsbot-*
+session.db
+session.db-*
+go-bot/session.db*
