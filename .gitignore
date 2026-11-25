@@ -33,6 +33,7 @@ FyVNae_X0AUn5DG
 ideas.txt
 *.md
 !README.md
+!AGENTS.md
 
 # ─── Assets de prueba / multimedia sin origen claro ───
 assets/hopecore/
@@ -46,9 +47,11 @@ files/*
 Thumbs.db
 *.log
 
-# ─── Bot en Go (go-bot/) ───
-go-bot/whatsbot
-go-bot/whatsbot-*
+# ─── Agente / OpenCode ───
+.opencode/
+
+# ─── Bot en Go ───
+whatsbot
+whatsbot-*
 session.db
 session.db-*
-go-bot/session.db*
