@@ -92,7 +92,7 @@ func TestSaPlanLimits(t *testing.T) {
 		t.Fatalf("plan estático=%+v", estatico)
 	}
 	animado := saPlanFor(true)
-	if animado.SizeLimit != 500*1024 || animado.MaxAudio != 5 || !animado.Animated {
+	if animado.SizeLimit != 500*1024 || animado.MaxAudio != 10 || !animado.Animated {
 		t.Fatalf("plan animado=%+v", animado)
 	}
 }
@@ -724,5 +724,14 @@ func TestSaPackDefaults(t *testing.T) {
 	blob := saExifBlob(saPackName(), saPackPublisher())
 	if !bytes.Contains(blob, []byte(pack)) || !bytes.Contains(blob, []byte(pub)) {
 		t.Fatal("el EXIF no incluye pack/publisher por defecto")
+	}
+}
+
+func TestSaLimitesStickerAudioAnimado(t *testing.T) {
+	if saAnimatedMaxAudio != 10 || saMaxVideoSeconds != 10 {
+		t.Fatalf("topes=%v/%v, esperaba 10/10", saAnimatedMaxAudio, saMaxVideoSeconds)
+	}
+	if saClampDuration(12, saMaxVideoSeconds) != 10 {
+		t.Fatal("la duración animada debía acotarse a 10 s")
 	}
 }

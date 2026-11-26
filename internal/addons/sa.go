@@ -40,8 +40,8 @@ const (
 	saStaticLimit      = 100 * 1024
 	saAnimatedLimit    = 500 * 1024
 	saStaticMaxAudio   = 10.0
-	saAnimatedMaxAudio = 5.0
-	saMaxVideoSeconds  = 5.0
+	saAnimatedMaxAudio = 10.0
+	saMaxVideoSeconds  = 10.0
 	saSessionTTL       = 2 * time.Minute
 	saDefaultCooldown  = 15 * time.Second
 )
@@ -330,7 +330,7 @@ func saPlanFor(animated bool) saPlan {
 	return saPlan{Animated: false, SizeLimit: saStaticLimit, MaxAudio: saStaticMaxAudio}
 }
 
-// saCalcFPS replica la compresión adaptativa de stickers.go, acotada a 5 s.
+// saCalcFPS replica la compresión adaptativa de stickers.go, acotada a 10 s.
 func saCalcFPS(duration float64) int {
 	switch {
 	case duration < 1.5:
@@ -345,7 +345,7 @@ func saCalcFPS(duration float64) int {
 }
 
 // saCalcFPSMode aplica el modo `high` de `.st` (más fps) sobre el esquema
-// adaptativo de `.sa`, siempre acotado al tope de 5 s.
+// adaptativo de `.sa`, siempre acotado al tope de 10 s.
 func saCalcFPSMode(mode string, duration float64) int {
 	if mode != "high" {
 		return saCalcFPS(duration)
@@ -543,7 +543,7 @@ func saEncodeAnimatedWebP(inputPath, outputPath string, start, duration float64,
 		duration = saMaxVideoSeconds
 	}
 	// Al invertir el bucle la duración final se duplica: recortamos la fuente
-	// para no superar el tope de 5 s.
+	// para no superar el tope de 10 s.
 	if a.Reverse && duration > saMaxVideoSeconds/2 {
 		duration = saMaxVideoSeconds / 2
 	}
@@ -764,6 +764,7 @@ func saApplyExif(webp []byte) []byte {
 	if err != nil || len(out) == 0 {
 		return webp
 	}
+	slog.Info("EXIF de sticker aplicado", "pack", saPackName(), "publisher", saPackPublisher(), "bytes", len(out))
 	return out
 }
 
