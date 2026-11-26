@@ -6,6 +6,7 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 
 	"whatsbot-go/internal/core"
 )
@@ -84,5 +85,38 @@ func TestPinSinMensajeCitado(t *testing.T) {
 	}
 	if len(textos) != 1 || !strings.Contains(textos[0], "Debes responder al mensaje") {
 		t.Fatalf("textos=%#v", textos)
+	}
+}
+
+func TestPinParticipantSinDispositivo(t *testing.T) {
+	t.Setenv("OWNER_NUMBERS", "58412345678")
+	prev := wagoGroupInfoFn
+	wagoGroupInfoFn = func(*core.Context) (*types.GroupInfo, error) { return &types.GroupInfo{}, nil }
+	t.Cleanup(func() { wagoGroupInfoFn = prev })
+
+	ctx := wagoCtx("1205@g.us")
+	ctx.Command = "pin"
+	ctx.Message.Message = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+		Text: proto.String("pin"),
+		ContextInfo: &waE2E.ContextInfo{
+			StanzaID:    proto.String("ABC123"),
+			Participant: proto.String("584141234567:12@s.whatsapp.net"),
+		},
+	}}
+	var enviado *waE2E.Message
+	ctx.SendHook = func(m *waE2E.Message) error { enviado = m; return nil }
+
+	if err := (Pin{}).Handle(ctx); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if enviado == nil || enviado.GetPinInChatMessage() == nil {
+		t.Fatal("no se envió PinInChatMessage")
+	}
+	key := enviado.GetPinInChatMessage().GetKey()
+	if key.GetParticipant() != "584141234567@s.whatsapp.net" {
+		t.Fatalf("participant=%q", key.GetParticipant())
+	}
+	if key.GetRemoteJID() != "1205@g.us" {
+		t.Fatalf("remoteJID=%q", key.GetRemoteJID())
 	}
 }

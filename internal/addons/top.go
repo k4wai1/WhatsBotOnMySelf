@@ -429,7 +429,7 @@ func topProcesarMensaje(client *whatsmeow.Client, msg *events.Message) {
 	if msg.Info.Chat.Server != types.GroupServer || !wagoContains(topActiveGroups(), chatID) {
 		return
 	}
-	userID := msg.Info.Sender.String()
+	userID := msg.Info.Sender.ToNonAD().String()
 	nombre := msg.Info.PushName
 	if msg.Info.IsFromMe {
 		userID = wagoUserOf(clientOwnID(client)) + "@s.whatsapp.net"

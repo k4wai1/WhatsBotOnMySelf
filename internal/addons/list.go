@@ -64,7 +64,7 @@ func listBuildPage(groups []*types.GroupInfo, pagina, offset int) string {
 	fmt.Fprintf(&b, "📋 *Lista de Grupos* (%d)\n\n", pagina)
 	for idx, group := range groups {
 		fmt.Fprintf(&b, "%d. *%s*\n   ID: `%s`\n   👥 Participantes: %d\n\n",
-			offset+idx+1, group.Name, group.JID.String(), len(group.Participants))
+			offset+idx+1, group.Name, group.JID.ToNonAD().String(), len(group.Participants))
 	}
 	b.WriteString("💡 *Tip:* Copia el ID para usar en otros comandos")
 	return b.String()

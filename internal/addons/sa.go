@@ -175,7 +175,13 @@ func saIsOwner(ctx *core.Context) bool {
 	if ctx == nil || ctx.Message == nil {
 		return false
 	}
-	return wagoContains(wagoOwnerNumbers(), ctx.SenderJID().User)
+	ownerNumbers := wagoOwnerNumbers()
+	for _, jid := range wagoSenderJIDs(ctx) {
+		if wagoContains(ownerNumbers, jid.User) {
+			return true
+		}
+	}
+	return false
 }
 
 // saCheckCooldown devuelve si el usuario puede usar el comando y, si no,

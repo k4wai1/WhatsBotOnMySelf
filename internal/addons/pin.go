@@ -7,6 +7,7 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 
 	"whatsbot-go/internal/core"
@@ -42,10 +43,15 @@ func (Pin) Handle(ctx *core.Context) error {
 		return ctx.Reply("⚠️ Debes responder al mensaje que deseas fijar o desfijar.")
 	}
 
+	participante := contextInfo.GetParticipant()
+	if jid, err := types.ParseJID(participante); err == nil {
+		participante = jid.ToNonAD().String()
+	}
+
 	key := &waCommon.MessageKey{
-		RemoteJID:   proto.String(ctx.ChatJID().String()),
+		RemoteJID:   proto.String(ctx.ChatJID().ToNonAD().String()),
 		ID:          proto.String(contextInfo.GetStanzaID()),
-		Participant: proto.String(contextInfo.GetParticipant()),
+		Participant: proto.String(participante),
 		FromMe:      proto.Bool(false),
 	}
 

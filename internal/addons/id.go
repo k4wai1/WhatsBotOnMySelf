@@ -17,7 +17,7 @@ func (Id) Handle(ctx *core.Context) error {
 	if ctx == nil {
 		return nil
 	}
-	text := "📝 *Info del Chat*\n\n🆔 *ID:* `" + ctx.ChatJID().String() + "`"
+	text := "📝 *Info del Chat*\n\n🆔 *ID:* `" + ctx.ChatJID().ToNonAD().String() + "`"
 	if err := ctx.Reply(text); err != nil {
 		slog.Error("❌ [id] Error:", "error", err)
 		return ctx.React("❌")

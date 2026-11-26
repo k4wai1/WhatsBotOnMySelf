@@ -24,15 +24,16 @@ func init() { core.Register(Add{}) }
 func (Add) Commands() []string { return []string{"add"} }
 
 var (
-	addMu         sync.Mutex
-	addCollectors = map[string]*addCollector{}
-	addTimeout    = 30 * time.Second
-	addClient     *whatsmeow.Client
-	addOnWhatsApp = func(client *whatsmeow.Client, number string) (bool, types.JID) {
+	addMu            sync.Mutex
+	addCollectors    = map[string]*addCollector{}
+	addTimeout       = 30 * time.Second
+	addClient        *whatsmeow.Client
+	addWhatsAppQuery = func(number string) []string { return []string{"+" + number} }
+	addOnWhatsApp    = func(client *whatsmeow.Client, number string) (bool, types.JID) {
 		if client == nil {
 			return false, types.EmptyJID
 		}
-		resp, err := client.IsOnWhatsApp(context.Background(), []string{number + "@s.whatsapp.net"})
+		resp, err := client.IsOnWhatsApp(context.Background(), addWhatsAppQuery(number))
 		if err != nil || len(resp) == 0 {
 			return false, types.EmptyJID
 		}
@@ -113,7 +114,14 @@ func (Add) Handle(ctx *core.Context) error {
 }
 
 func addCollect(collector *addCollector, client *whatsmeow.Client, msg *events.Message) {
-	if msg == nil || msg.Message == nil || msg.Info.Chat != collector.Chat || msg.Info.Sender != collector.Sender {
+	if msg == nil || msg.Message == nil || collector == nil {
+		return
+	}
+	if msg.Info.Chat.ToNonAD() != collector.Chat.ToNonAD() {
+		return
+	}
+	if !wagoSameUser(msg.Info.Sender, collector.Sender) &&
+		(msg.Info.SenderAlt.IsEmpty() || !wagoSameUser(msg.Info.SenderAlt, collector.Sender)) {
 		return
 	}
 	addMu.Lock()
@@ -141,20 +149,69 @@ func addCollect(collector *addCollector, client *whatsmeow.Client, msg *events.M
 		return
 	}
 	collector.Collected = true
+	if collector.Timer != nil {
+		collector.Timer.Stop()
+	}
 	if client != nil {
 		client.RemoveEventHandler(collector.Handler)
 	}
+	addMu.Lock()
+	delete(addCollectors, collector.Chat.String()+"|"+collector.Sender.String())
+	addMu.Unlock()
 
 	addProcessNumbers(client, collector, numbers)
 }
 
-// addNumbersFromMessage extrae números de un contacto vCard o de un texto.
+// addUnwrapMessage desenvuelve los contenedores de whatsmeow hasta el
+// mensaje real (view once, efímero, enviado desde otro dispositivo, etc.).
+func addUnwrapMessage(msg *waE2E.Message) *waE2E.Message {
+	for msg != nil {
+		switch {
+		case msg.GetEphemeralMessage() != nil:
+			msg = msg.GetEphemeralMessage().GetMessage()
+		case msg.GetViewOnceMessage() != nil:
+			msg = msg.GetViewOnceMessage().GetMessage()
+		case msg.GetViewOnceMessageV2() != nil:
+			msg = msg.GetViewOnceMessageV2().GetMessage()
+		case msg.GetViewOnceMessageV2Extension() != nil:
+			msg = msg.GetViewOnceMessageV2Extension().GetMessage()
+		case msg.GetDeviceSentMessage() != nil:
+			msg = msg.GetDeviceSentMessage().GetMessage()
+		default:
+			return msg
+		}
+	}
+	return nil
+}
+
+// addNumbersFromMessage extrae números de contactos vCard o de un texto.
 func addNumbersFromMessage(msg *waE2E.Message) []string {
+	msg = addUnwrapMessage(msg)
 	if msg == nil {
 		return nil
 	}
+	var out []string
+	seen := make(map[string]bool)
+	appendNumbers := func(numeros []string) {
+		for _, n := range numeros {
+			if !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
 	if contact := msg.GetContactMessage(); contact != nil {
-		return wagoVCardNumbers(contact.GetVcard())
+		appendNumbers(wagoVCardNumbers(contact.GetVcard()))
+	}
+	if arr := msg.GetContactsArrayMessage(); arr != nil {
+		for _, contact := range arr.GetContacts() {
+			if contact != nil {
+				appendNumbers(wagoVCardNumbers(contact.GetVcard()))
+			}
+		}
+	}
+	if len(out) > 0 {
+		return out
 	}
 	text := msg.GetConversation()
 	if text == "" && msg.GetExtendedTextMessage() != nil {
@@ -179,7 +236,7 @@ func addProcessNumbers(client *whatsmeow.Client, collector *addCollector, number
 			continue
 		}
 		if real.User != "" {
-			jid = real
+			jid = real.ToNonAD()
 		}
 		_, err := client.UpdateGroupParticipants(context.Background(), collector.Chat, []types.JID{jid}, whatsmeow.ParticipantChangeAdd)
 		if err != nil {
@@ -209,7 +266,7 @@ func addWithFallback(ctx *core.Context, number string, originalID types.MessageI
 		return ctx.Reply("⚠️ El número *" + number + "* no está en WhatsApp.")
 	}
 	if real.User != "" {
-		jid = real
+		jid = real.ToNonAD()
 	}
 	if _, err := client.UpdateGroupParticipants(context.Background(), ctx.ChatJID(), []types.JID{jid}, whatsmeow.ParticipantChangeAdd); err == nil {
 		return ctx.React("✅")

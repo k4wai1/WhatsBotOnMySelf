@@ -29,6 +29,12 @@ var (
 	banNow      = time.Now
 	banInterval = time.Minute
 	banTimeRe   = regexp.MustCompile(`\s(\d+)$`)
+
+	// banUpdateFn es inyectable en pruebas.
+	banUpdateFn = func(client *whatsmeow.Client, chat, participant types.JID, action whatsmeow.ParticipantChange) error {
+		_, err := client.UpdateGroupParticipants(context.Background(), chat, []types.JID{participant}, action)
+		return err
+	}
 )
 
 // Ban porta addons/ban.js.
@@ -68,7 +74,9 @@ func banParseRequest(args []string, mentioned []string, quotedParticipant string
 		}
 		targets := make([]string, 0, len(mentioned))
 		for _, m := range mentioned {
-			targets = append(targets, wagoJIDNormalize(m))
+			if parsed := banParseJID(m); parsed != "" {
+				targets = append(targets, parsed)
+			}
 		}
 		return targets, minutes
 	}
@@ -78,7 +86,10 @@ func banParseRequest(args []string, mentioned []string, quotedParticipant string
 				minutes = n
 			}
 		}
-		return []string{wagoJIDNormalize(quotedParticipant)}, minutes
+		if parsed := banParseJID(quotedParticipant); parsed != "" {
+			return []string{parsed}, minutes
+		}
+		return nil, minutes
 	}
 	if raw != "" {
 		numberPart := raw
@@ -94,11 +105,33 @@ func banParseRequest(args []string, mentioned []string, quotedParticipant string
 	return nil, minutes
 }
 
-// wagoJIDNormalize deja solo número@s.whatsapp.net.
+// banParseJID conserva el servidor original (@lid o @s.whatsapp.net) y
+// elimina el sufijo de dispositivo (:AD).
+func banParseJID(raw string) string {
+	jid, err := types.ParseJID(strings.TrimSpace(raw))
+	if err != nil || jid.IsEmpty() {
+		return ""
+	}
+	return jid.ToNonAD().String()
+}
+
+// wagoJIDNormalize se mantiene solo para entradas numéricas antiguas; NO se
+// usa sobre menciones ni participantes citados porque destruye los @lid.
 func wagoJIDNormalize(jid string) string {
 	base := strings.SplitN(jid, "@", 2)[0]
 	base = strings.SplitN(base, ":", 2)[0]
 	return base + "@s.whatsapp.net"
+}
+
+// banResolveTargets resuelve cada objetivo contra el grupo antes de usarlo.
+func banResolveTargets(info *types.GroupInfo, targets []string) []types.JID {
+	out := make([]types.JID, 0, len(targets))
+	for _, target := range targets {
+		if jid, _ := wagoResolveParticipant(info, target); !jid.IsEmpty() {
+			out = append(out, jid)
+		}
+	}
+	return out
 }
 
 func (Ban) Handle(ctx *core.Context) error {
@@ -145,20 +178,17 @@ func (Ban) Handle(ctx *core.Context) error {
 	protected := append(wagoOwnerNumbers(), wagoBotNumbers(ctx)...)
 	success := 0
 
-	for _, target := range targets {
-		number := strings.SplitN(target, "@", 2)[0]
+	for _, targetJID := range banResolveTargets(info, targets) {
+		number := targetJID.User
 		if wagoContains(protected, number) {
-			continue
-		}
-		targetJID, err := types.ParseJID(target)
-		if err != nil {
 			continue
 		}
 		if wagoIsAdminIn(info, targetJID) {
 			continue
 		}
-		if _, err := ctx.Client.UpdateGroupParticipants(context.Background(), ctx.ChatJID(), []types.JID{targetJID}, whatsmeow.ParticipantChangeRemove); err != nil {
-			wagoAppendLog("ban.log", "❌ Error al expulsar "+number+": "+err.Error())
+		if err := banUpdateFn(ctx.Client, ctx.ChatJID(), targetJID, whatsmeow.ParticipantChangeRemove); err != nil {
+			slog.Warn("❌ [ban] No se pudo expulsar", "jid", targetJID.String(), "error", err)
+			wagoAppendLog("ban.log", "❌ Error al expulsar "+targetJID.String()+": "+err.Error())
 			continue
 		}
 		success++
@@ -166,7 +196,7 @@ func (Ban) Handle(ctx *core.Context) error {
 			bans = append(bans, banEntry{
 				ChatID:  ctx.ChatJID().String(),
 				Number:  number,
-				FullJID: target,
+				FullJID: targetJID.String(),
 				Until:   banNow().Add(time.Duration(minutes) * time.Minute).UnixMilli(),
 			})
 		}
@@ -218,7 +248,12 @@ func banReadd(client *whatsmeow.Client) {
 		if err != nil {
 			continue
 		}
-		if _, err := client.UpdateGroupParticipants(context.Background(), chat, []types.JID{target}, whatsmeow.ParticipantChangeAdd); err != nil {
+		target = target.ToNonAD()
+		if target.IsEmpty() {
+			continue
+		}
+		if err := banUpdateFn(client, chat, target, whatsmeow.ParticipantChangeAdd); err != nil {
+			slog.Warn("❌ [ban] No se pudo reincorporar", "jid", target.String(), "error", err)
 			remaining = append(remaining, ban)
 			continue
 		}

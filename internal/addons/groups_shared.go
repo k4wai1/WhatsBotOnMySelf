@@ -50,6 +50,11 @@ func wagoBotNumbersForClient(client *whatsmeow.Client) []string {
 			set[n] = true
 		}
 	}
+	if client != nil && client.Store != nil {
+		if n := client.Store.LID.User; n != "" {
+			set[n] = true
+		}
+	}
 	for _, part := range strings.Split(os.Getenv("BOT_NUMBERS"), ",") {
 		if n := wagoDigits(part); n != "" {
 			set[n] = true
@@ -122,27 +127,100 @@ func wagoGroupInfo(ctx *core.Context) (*types.GroupInfo, error) {
 	return wagoGroupInfoFn(ctx)
 }
 
+// wagoSameUser compara dos JID ignorando el número de dispositivo (:AD).
+func wagoSameUser(a, b types.JID) bool {
+	if a.IsEmpty() || b.IsEmpty() {
+		return false
+	}
+	return a.ToNonAD() == b.ToNonAD()
+}
+
+// wagoResolveParticipant resuelve un JID (que puede venir en @lid o con
+// dispositivo :AD) contra los participantes del grupo, devolviendo el JID
+// real que debe usarse en las APIs de whatsmeow y su número limpio.
+// NUNCA convierte @lid a @s.whatsapp.net inventando un número.
+func wagoResolveParticipant(info *types.GroupInfo, rawJID string) (types.JID, string) {
+	jid, err := types.ParseJID(strings.TrimSpace(rawJID))
+	if err != nil {
+		return types.EmptyJID, ""
+	}
+	jid = jid.ToNonAD()
+	if jid.IsEmpty() {
+		return types.EmptyJID, ""
+	}
+	if info != nil {
+		for _, p := range info.Participants {
+			if !wagoSameUser(p.JID, jid) && !wagoSameUser(p.LID, jid) && !wagoSameUser(p.PhoneNumber, jid) {
+				continue
+			}
+			real := p.JID.ToNonAD()
+			if real.IsEmpty() {
+				real = p.LID.ToNonAD()
+			}
+			if real.IsEmpty() {
+				real = p.PhoneNumber.ToNonAD()
+			}
+			if real.IsEmpty() {
+				real = jid
+			}
+			return real, wagoDigits(real.User)
+		}
+	}
+	return jid, wagoDigits(jid.User)
+}
+
+// wagoSenderJIDs devuelve el remitente y su JID alternativo (@lid / número).
+func wagoSenderJIDs(ctx *core.Context) []types.JID {
+	if ctx == nil || ctx.Message == nil {
+		return nil
+	}
+	sender := ctx.SenderJID()
+	alt := ctx.Message.Info.SenderAlt
+	if alt.IsEmpty() || wagoSameUser(sender, alt) {
+		return []types.JID{sender}
+	}
+	return []types.JID{sender, alt}
+}
+
 // wagoSenderIsAdminOrOwner comprueba dueño del bot o admin del grupo.
 func wagoSenderIsAdminOrOwner(ctx *core.Context, info *types.GroupInfo) bool {
-	number := ctx.SenderJID().User
-	for _, owner := range wagoOwnerNumbers() {
-		if owner == number {
-			return true
+	if ctx == nil {
+		return false
+	}
+	senders := wagoSenderJIDs(ctx)
+	for _, sender := range senders {
+		number := sender.User
+		for _, owner := range wagoOwnerNumbers() {
+			if owner == number {
+				return true
+			}
+		}
+		if ctx.Client != nil && ctx.Client.Store != nil {
+			if id := ctx.Client.Store.ID; id != nil && wagoSameUser(*id, sender) {
+				return true
+			}
+			if wagoSameUser(ctx.Client.Store.LID, sender) {
+				return true
+			}
 		}
 	}
 	if info == nil {
 		return false
 	}
-	return wagoIsAdminIn(info, ctx.SenderJID())
+	for _, sender := range senders {
+		if wagoIsAdminIn(info, sender) {
+			return true
+		}
+	}
+	return false
 }
 
 func wagoIsAdminIn(info *types.GroupInfo, jid types.JID) bool {
-	if info == nil {
+	if info == nil || jid.IsEmpty() {
 		return false
 	}
 	for _, p := range info.Participants {
-		if p.JID.User == jid.User || (p.PhoneNumber.User != "" && p.PhoneNumber.User == jid.User) ||
-			(p.LID.User != "" && p.LID.User == jid.User) {
+		if wagoSameUser(p.JID, jid) || wagoSameUser(p.LID, jid) || wagoSameUser(p.PhoneNumber, jid) {
 			return p.IsAdmin || p.IsSuperAdmin
 		}
 	}
@@ -155,15 +233,24 @@ func wagoBotIsAdmin(ctx *core.Context, info *types.GroupInfo) bool {
 	}
 	bots := wagoBotNumbers(ctx)
 	for _, p := range info.Participants {
-		candidates := []string{p.JID.User, p.PhoneNumber.User, p.LID.User}
-		for _, c := range candidates {
-			if c == "" {
+		if !p.IsAdmin && !p.IsSuperAdmin {
+			continue
+		}
+		for _, candidato := range []types.JID{p.JID, p.LID, p.PhoneNumber} {
+			if candidato.IsEmpty() {
 				continue
 			}
-			for _, b := range bots {
-				if b == c && (p.IsAdmin || p.IsSuperAdmin) {
-					return true
-				}
+			if wagoContains(bots, candidato.User) {
+				return true
+			}
+		}
+		if ctx != nil && ctx.Client != nil && ctx.Client.Store != nil {
+			if id := ctx.Client.Store.ID; id != nil &&
+				(wagoSameUser(*id, p.JID) || wagoSameUser(*id, p.LID) || wagoSameUser(*id, p.PhoneNumber)) {
+				return true
+			}
+			if wagoSameUser(ctx.Client.Store.LID, p.JID) || wagoSameUser(ctx.Client.Store.LID, p.LID) {
+				return true
 			}
 		}
 	}
@@ -188,9 +275,17 @@ func wagoAppendLog(name, line string) {
 	_, _ = f.WriteString("[" + time.Now().UTC().Format(time.RFC3339) + "] " + line + "\n")
 }
 
-// wagoVCardNumbers extrae los waid=... de una vCard.
+// wagoVCardNumbers extrae números de waid=... y de las líneas TEL de una vCard.
 func wagoVCardNumbers(vcard string) []string {
 	var out []string
+	seen := make(map[string]bool)
+	add := func(raw string) {
+		if n := wagoNormalizeNumber(raw); n != "" && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+
 	rest := vcard
 	for {
 		idx := strings.Index(rest, "waid=")
@@ -202,12 +297,24 @@ func wagoVCardNumbers(vcard string) []string {
 		for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
 			end++
 		}
-		if n := wagoNormalizeNumber(rest[:end]); n != "" {
-			out = append(out, n)
+		if end > 0 {
+			add(rest[:end])
 		}
 		if end == 0 {
 			rest = rest[1:]
 		}
+	}
+
+	for _, line := range strings.Split(vcard, "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) < 4 || !strings.EqualFold(line[:3], "TEL") {
+			continue
+		}
+		colon := strings.IndexByte(line, ':')
+		if colon < 0 {
+			continue
+		}
+		add(line[colon+1:])
 	}
 	return out
 }

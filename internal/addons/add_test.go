@@ -6,6 +6,7 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 
 	"whatsbot-go/internal/core"
 )
@@ -73,5 +74,84 @@ func TestAddPideNumeroSinCliente(t *testing.T) {
 	}
 	if len(textos) != 1 || !strings.Contains(textos[0], "Envía el contacto o escribe el número") {
 		t.Fatalf("textos=%#v", textos)
+	}
+}
+
+func TestAddConsultaWhatsAppConMas(t *testing.T) {
+	got := addWhatsAppQuery("58412345678")
+	if len(got) != 1 || got[0] != "+58412345678" {
+		t.Fatalf("consulta=%#v", got)
+	}
+}
+
+func TestAddNumbersWrappersYArray(t *testing.T) {
+	vcard1 := "BEGIN:VCARD\nTEL;waid=584141234567:+58 414-1234567\nEND:VCARD"
+	vcard2 := "BEGIN:VCARD\nTEL;TYPE=CELL:+58 212-1234567\nEND:VCARD"
+	array := &waE2E.Message{ContactsArrayMessage: &waE2E.ContactsArrayMessage{
+		Contacts: []*waE2E.ContactMessage{
+			{Vcard: protoString(vcard1)},
+			{Vcard: protoString(vcard2)},
+		},
+	}}
+	envuelto := &waE2E.Message{EphemeralMessage: &waE2E.FutureProofMessage{
+		Message: &waE2E.Message{ViewOnceMessageV2: &waE2E.FutureProofMessage{Message: array}},
+	}}
+	got := addNumbersFromMessage(envuelto)
+	if len(got) != 2 || got[0] != "584141234567" || got[1] != "582121234567" {
+		t.Fatalf("contacts array=%#v", got)
+	}
+
+	disp := &waE2E.Message{DeviceSentMessage: &waE2E.DeviceSentMessage{
+		Message: &waE2E.Message{ContactMessage: &waE2E.ContactMessage{Vcard: protoString(vcard1)}},
+	}}
+	got = addNumbersFromMessage(disp)
+	if len(got) != 1 || got[0] != "584141234567" {
+		t.Fatalf("device sent=%#v", got)
+	}
+}
+
+func TestAddCollectDeviceYDifferenteLID(t *testing.T) {
+	chat := types.NewJID("1205", types.GroupServer)
+	lid := types.NewJID("182790133969133", "lid")
+	numero := types.JID{User: "58412345678", Server: types.DefaultUserServer, Device: 12}
+	collector := &addCollector{Chat: chat, Sender: lid, PromptID: "p1"}
+	key := chat.String() + "|" + lid.String()
+	addMu.Lock()
+	addCollectors[key] = collector
+	addMu.Unlock()
+	t.Cleanup(func() {
+		addMu.Lock()
+		delete(addCollectors, key)
+		addMu.Unlock()
+	})
+
+	vcard := "BEGIN:VCARD\nTEL;waid=584141234567:+58 414-1234567\nEND:VCARD"
+	msg := &events.Message{
+		Info: types.MessageInfo{MessageSource: types.MessageSource{
+			Chat: chat, Sender: numero, SenderAlt: lid,
+		}},
+		Message: &waE2E.Message{ContactMessage: &waE2E.ContactMessage{Vcard: protoString(vcard)}},
+	}
+	addCollect(collector, nil, msg)
+	if !collector.Collected {
+		t.Fatal("el mensaje del mismo usuario con otro dispositivo debía recolectarse")
+	}
+	addMu.Lock()
+	_, quedo := addCollectors[key]
+	addMu.Unlock()
+	if quedo {
+		t.Fatal("el colector debía borrarse tras recolectar números válidos")
+	}
+
+	otro := &events.Message{
+		Info: types.MessageInfo{MessageSource: types.MessageSource{
+			Chat: chat, Sender: types.NewJID("584999999999", types.DefaultUserServer),
+		}},
+		Message: &waE2E.Message{ContactMessage: &waE2E.ContactMessage{Vcard: protoString(vcard)}},
+	}
+	segundo := &addCollector{Chat: chat, Sender: lid, PromptID: "p2"}
+	addCollect(segundo, nil, otro)
+	if segundo.Collected {
+		t.Fatal("un remitente distinto no debe activar el colector")
 	}
 }
