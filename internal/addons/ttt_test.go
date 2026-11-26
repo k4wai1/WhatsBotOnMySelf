@@ -168,4 +168,54 @@ func TestTttHandleMovimiento(t *testing.T) {
 	tttMu.Unlock()
 }
 
+func TestTttMencionaBotLiteral(t *testing.T) {
+	casos := []struct {
+		parts []string
+		raw   string
+		want  bool
+	}{
+		{[]string{"@bot"}, "!ttt @bot", true},
+		{[]string{"@BOT", "facil"}, "!ttt @BOT facil", true},
+		{[]string{"@bot,"}, "!ttt @bot, dificil", true},
+		{[]string{"ana"}, "!ttt ana", false},
+	}
+	for _, c := range casos {
+		if got := tttMencionaBot(c.parts, c.raw, nil, nil); got != c.want {
+			t.Fatalf("tttMencionaBot(%#v, %q)=%v, esperaba %v", c.parts, c.raw, got, c.want)
+		}
+	}
+}
+
+func TestTttHandleBotLiteral(t *testing.T) {
+	tttMu.Lock()
+	tttGames = map[string]*tttJuego{}
+	tttWaiting = nil
+	tttMu.Unlock()
+	prevDelay := tttBotDelay
+	tttBotDelay = time.Hour
+	t.Cleanup(func() { tttBotDelay = prevDelay })
+
+	t.Setenv("BOT_NUMBERS", "584000000000")
+	ctx := wagoCtx("1205@g.us")
+	ctx.Command = "ttt"
+	ctx.Args = []string{"@bot", "dificil"}
+	ctx.RawText = "!ttt @bot dificil"
+	ctx.Message.Message = &waE2E.Message{Conversation: protoString("!ttt @bot dificil")}
+	ctx.SendHook = func(*waE2E.Message) error { return nil }
+	ctx.ReactHook = func(string) error { return nil }
+	if err := (Ttt{}).Handle(ctx); err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+
+	tttMu.Lock()
+	game := tttGames["1205@g.us"]
+	tttMu.Unlock()
+	if game == nil {
+		t.Fatal("no se creó la partida con @bot literal")
+	}
+	if !game.IsBot || game.Difficulty != "dificil" {
+		t.Fatalf("juego=%#v", game)
+	}
+}
+
 var _ = core.DataPath

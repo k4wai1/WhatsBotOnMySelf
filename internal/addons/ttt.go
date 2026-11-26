@@ -44,12 +44,13 @@ type tttEspera struct {
 }
 
 var (
-	tttMu          sync.Mutex
-	tttGames       = map[string]*tttJuego{}
-	tttWaiting     *tttEspera
-	tttCoordRe     = regexp.MustCompile(`^(?:([abc])\s*([123])|([123])\s*([abc]))$`)
-	tttBotDelay    = time.Second
-	tttGameTimeout = 4 * time.Minute
+	tttMu           sync.Mutex
+	tttGames        = map[string]*tttJuego{}
+	tttWaiting      *tttEspera
+	tttCoordRe      = regexp.MustCompile(`^(?:([abc])\s*([123])|([123])\s*([abc]))$`)
+	tttBotLiteralRe = regexp.MustCompile(`(?i)(?:^|[[:space:]])@bot(?:[[:space:]]|$|[[:punct:]])`)
+	tttBotDelay     = time.Second
+	tttGameTimeout  = 4 * time.Minute
 )
 
 // Ttt porta addons/ttt.js: tres en raya.
@@ -395,6 +396,30 @@ func tttPrefijos() []string {
 	return topPrefijos()
 }
 
+// tttMencionaBot acepta menciones reales, el número escrito a mano y el literal "@bot".
+func tttMencionaBot(parts []string, rawText string, mencionados, botNums []string) bool {
+	for _, jid := range mencionados {
+		if wagoContains(botNums, strings.SplitN(jid, "@", 2)[0]) {
+			return true
+		}
+	}
+	cuerpo := strings.ToLower(rawText)
+	for _, num := range botNums {
+		if num != "" && strings.Contains(cuerpo, "@"+num) {
+			return true
+		}
+	}
+	if tttBotLiteralRe.MatchString(cuerpo) {
+		return true
+	}
+	for _, part := range parts {
+		if strings.EqualFold(strings.Trim(part, ".,!?¿¡:;"), "@bot") {
+			return true
+		}
+	}
+	return false
+}
+
 func tttInit(client *whatsmeow.Client, st *store.Store) error {
 	if client == nil {
 		return nil
@@ -480,22 +505,7 @@ func (Ttt) Handle(ctx *core.Context) error {
 		mencionados = ci.GetMentionedJID()
 	}
 	botNums := wagoBotNumbers(ctx)
-	botMencionado := false
-	for _, jid := range mencionados {
-		if wagoContains(botNums, strings.SplitN(jid, "@", 2)[0]) {
-			botMencionado = true
-			break
-		}
-	}
-	if !botMencionado {
-		cuerpo := strings.ToLower(ctx.RawText)
-		for _, num := range botNums {
-			if strings.Contains(cuerpo, "@"+num) {
-				botMencionado = true
-				break
-			}
-		}
-	}
+	botMencionado := tttMencionaBot(parts, ctx.RawText, mencionados, botNums)
 
 	switch {
 	case botMencionado:

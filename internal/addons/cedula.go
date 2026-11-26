@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -89,9 +90,36 @@ type cedulaDatos struct {
 }
 
 type cedulaRespuesta struct {
-	Error    any          `json:"error"`
-	ErrorStr string       `json:"error_str"`
-	Data     *cedulaDatos `json:"data"`
+	Error    json.RawMessage `json:"error"`
+	ErrorStr string          `json:"error_str"`
+	Data     json.RawMessage `json:"data"`
+}
+
+// cedulaEsCierto interpreta tanto error:true como error:"INVALID_TOKEN".
+func cedulaEsCierto(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return false
+	}
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return strings.TrimSpace(x) != ""
+	default:
+		return x != nil
+	}
+}
+
+func cedulaBodyPreview(body []byte) string {
+	s := strings.TrimSpace(string(body))
+	if len(s) > 300 {
+		return s[:300] + "…"
+	}
+	return s
 }
 
 func (Cedula) Handle(ctx *core.Context) error {
@@ -120,36 +148,52 @@ func (Cedula) Handle(ctx *core.Context) error {
 
 	consulta := fmt.Sprintf("%s?app_id=%s&token=%s&nacionalidad=%s&cedula=%s",
 		cedulaURL, url.QueryEscape(appID), url.QueryEscape(token), url.QueryEscape(nacionalidad), url.QueryEscape(limpio))
-	resp, err := cedulaHTTP.Get(consulta)
+	req, err := http.NewRequest(http.MethodGet, consulta, nil)
 	if err != nil {
+		slog.Error("❌ [cedula] error creando petición", "error", err)
+		_ = ctx.React("❌")
+		return ctx.Reply("❌ Error al consultar la API. Verifica tu conexión e intenta de nuevo.")
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; WhatsBotOnMySelf)")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Referer", "https://cedula.com.ve/")
+	resp, err := cedulaHTTP.Do(req)
+	if err != nil {
+		slog.Error("❌ [cedula] error de red", "error", err)
 		_ = ctx.React("❌")
 		return ctx.Reply("❌ Error al consultar la API. Verifica tu conexión e intenta de nuevo.")
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		slog.Error("❌ [cedula] error leyendo respuesta", "status", resp.StatusCode, "error", err)
 		_ = ctx.React("❌")
 		return ctx.Reply("❌ Error al consultar la API. Verifica tu conexión e intenta de nuevo.")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slog.Error("❌ [cedula] HTTP inesperado", "status", resp.StatusCode, "body", cedulaBodyPreview(body))
+		_ = ctx.React("❌")
+		return ctx.Reply(fmt.Sprintf("❌ Error al consultar la API (HTTP %d).", resp.StatusCode))
 	}
 	var parsed cedulaRespuesta
 	if err := json.Unmarshal(body, &parsed); err != nil {
+		slog.Error("❌ [cedula] JSON inválido", "status", resp.StatusCode, "body", cedulaBodyPreview(body), "error", err)
 		_ = ctx.React("❌")
-		return ctx.Reply("❌ Error al consultar la API. Verifica tu conexión e intenta de nuevo.")
+		return ctx.Reply("❌ Error al consultar la API. Respuesta inesperada del proveedor.")
 	}
 
-	hayError := parsed.Data == nil
-	if b, ok := parsed.Error.(bool); ok && b {
-		hayError = true
+	var datos *cedulaDatos
+	if len(parsed.Data) > 0 {
+		if err := json.Unmarshal(parsed.Data, &datos); err != nil {
+			slog.Warn("⚠️ [cedula] data no es un objeto", "data", cedulaBodyPreview(parsed.Data), "error", err)
+		}
 	}
-	if s, ok := parsed.Error.(string); ok && s != "" {
-		hayError = true
-	}
-	if hayError {
+	if datos == nil || cedulaEsCierto(parsed.Error) || parsed.ErrorStr != "" {
+		slog.Warn("⚠️ [cedula] consulta fallida", "status", resp.StatusCode, "error_str", parsed.ErrorStr, "error", cedulaBodyPreview(parsed.Error), "data", cedulaBodyPreview(parsed.Data))
 		_ = ctx.React("❌")
 		return ctx.Reply("❌ *Consulta fallida*\n\n" + cedulaError(parsed.ErrorStr))
 	}
-
-	d := parsed.Data
+	d := datos
 	nombre := strings.TrimSpace(strings.Join([]string{d.PrimerNombre, d.SegundoNombre}, " "))
 	apellido := strings.TrimSpace(strings.Join([]string{d.PrimerApellido, d.SegundoApellido}, " "))
 	rif := d.RIF

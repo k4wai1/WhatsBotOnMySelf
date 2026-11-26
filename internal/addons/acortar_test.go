@@ -18,9 +18,10 @@ func acortarSetup(t *testing.T, handler http.HandlerFunc) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	prev := acortarAPIBase
+	prev, prevFallback := acortarAPIBase, acortarFallbackBase
 	acortarAPIBase = srv.URL
-	t.Cleanup(func() { acortarAPIBase = prev })
+	acortarFallbackBase = srv.URL + "/fallback"
+	t.Cleanup(func() { acortarAPIBase, acortarFallbackBase = prev, prevFallback })
 }
 
 func acortarQuotedCtx(c *capture, cmd, quoted string) *core.Context {
@@ -106,8 +107,33 @@ func TestAcortarErrorAPI(t *testing.T) {
 	if len(c.reactions) != 2 || c.reactions[0] != "⏳" || c.reactions[1] != "❌" {
 		t.Fatalf("reacciones inesperadas: %#v", c.reactions)
 	}
-	if len(c.texts) != 0 {
-		t.Fatalf("no esperaba texto, obtuve %#v", c.texts)
+	if len(c.texts) != 1 || !strings.Contains(c.texts[0], "No pude acortar") {
+		t.Fatalf("texto inesperado: %#v", c.texts)
+	}
+}
+
+func TestAcortarFallbackHtmlDeIsGd(t *testing.T) {
+	acortarSetup(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/fallback") {
+			if got := r.URL.Query().Get("url"); got != "https://example.com/largo" {
+				t.Errorf("url inesperada en fallback: %q", got)
+			}
+			_, _ = w.Write([]byte("https://tinyurl.com/abc123\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html>502 proxy</html>"))
+	})
+
+	c := &capture{}
+	if err := (Acortar{}).Handle(c.newCtx("acortar", "https://example.com/largo")); err != nil {
+		t.Fatalf("Handle devolvió error: %v", err)
+	}
+	if len(c.texts) != 1 || c.texts[0] != "🔗 https://tinyurl.com/abc123" {
+		t.Fatalf("texto inesperado: %#v", c.texts)
+	}
+	if len(c.reactions) != 2 || c.reactions[0] != "⏳" || c.reactions[1] != "✅" {
+		t.Fatalf("reacciones inesperadas: %#v", c.reactions)
 	}
 }
 

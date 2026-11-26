@@ -6,6 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
+
 	"whatsbot-go/internal/core"
 )
 
@@ -76,5 +80,33 @@ func TestMiscComandoDesconocido(t *testing.T) {
 	}
 	if len(c.reactions) != 1 || c.reactions[0] != "❓" {
 		t.Fatalf("esperaba ❓, obtuve %#v", c.reactions)
+	}
+}
+
+func TestMiscPongEditaEnLugarDeEnviar(t *testing.T) {
+	prevSend, prevEdit := wagoEnviarHook, wagoEditarHook
+	wagoEnviarHook = func(_ *whatsmeow.Client, _ types.JID, _ *waE2E.Message) (types.MessageID, error) {
+		return "ID-PONG", nil
+	}
+	var editado string
+	wagoEditarHook = func(_ *whatsmeow.Client, _ types.JID, id, texto string) error {
+		editado = id + "|" + texto
+		return nil
+	}
+	t.Cleanup(func() { wagoEnviarHook, wagoEditarHook = prevSend, prevEdit })
+
+	c := &capture{}
+	ctx := wagoCtx("58412345678")
+	ctx.Command = "pong"
+	ctx.Client = &whatsmeow.Client{}
+	ctx.SendHook = func(m *waE2E.Message) error { c.texts = append(c.texts, messageText(m)); return nil }
+	if err := (Misc{}).Handle(ctx); err != nil {
+		t.Fatalf("Handle(pong) error: %v", err)
+	}
+	if len(c.texts) != 0 {
+		t.Fatalf("no debía enviar textos nuevos: %#v", c.texts)
+	}
+	if !strings.HasPrefix(editado, "ID-PONG|🏓 pong: ") {
+		t.Fatalf("edición inesperada: %q", editado)
 	}
 }

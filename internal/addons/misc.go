@@ -57,14 +57,19 @@ func (m Misc) Handle(ctx *core.Context) error {
 
 	case "pong":
 		start := time.Now()
-		if err := ctx.SendQuoted(core.TextMessage("🏓"), ctx.Message); err != nil {
-			return err
+		var msgID string
+		if ctx.Client != nil && ctx.Message != nil {
+			if id, err := wagoEnviarHook(ctx.Client, ctx.ChatJID(), core.TextMessage("🏓")); err == nil {
+				msgID = string(id)
+			}
+		}
+		if msgID == "" {
+			if err := ctx.SendQuoted(core.TextMessage("🏓"), ctx.Message); err != nil {
+				return err
+			}
 		}
 		elapsed := time.Since(start)
-		// El original edita el mensaje "🏓"; la API del núcleo no expone el
-		// key del mensaje enviado, así que se envía el resultado como
-		// segundo mensaje citado.
-		return ctx.SendQuoted(core.TextMessage("🏓 pong: "+miscItoa(elapsed.Milliseconds())+"ms"), ctx.Message)
+		return wagoEditar(ctx, msgID, "🏓 pong: "+miscItoa(elapsed.Milliseconds())+"ms")
 
 	default:
 		return ctx.React("❓")

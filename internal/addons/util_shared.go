@@ -3,6 +3,7 @@ package addons
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -14,6 +15,42 @@ import (
 
 	"whatsbot-go/internal/core"
 )
+
+// wagoEnviarHook envía un mensaje y devuelve su ID. Inyectable para pruebas.
+var wagoEnviarHook = func(client *whatsmeow.Client, jid types.JID, msg *waE2E.Message) (types.MessageID, error) {
+	if client == nil {
+		return "", fmt.Errorf("sin cliente")
+	}
+	resp, err := client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
+// wagoEditarHook edita un mensaje propio. Inyectable para pruebas sin red.
+var wagoEditarHook = func(client *whatsmeow.Client, jid types.JID, msgID, texto string) error {
+	if client == nil || msgID == "" {
+		return fmt.Errorf("sin cliente o identificador de mensaje")
+	}
+	_, err := client.SendMessage(context.Background(), jid,
+		client.BuildEdit(jid, types.MessageID(msgID), core.TextMessage(texto)))
+	return err
+}
+
+// wagoEditar mantiene el comportamiento de Node.js: edita el mensaje ya
+// enviado; si no es posible (sin cliente), envía el texto como respuesta nueva.
+func wagoEditar(ctx *core.Context, msgID, texto string) error {
+	if ctx != nil && ctx.Client != nil && ctx.Message != nil && msgID != "" {
+		if err := wagoEditarHook(ctx.Client, ctx.ChatJID(), msgID, texto); err == nil {
+			return nil
+		}
+	}
+	if ctx != nil {
+		return ctx.Reply(texto)
+	}
+	return nil
+}
 
 func wagoGetenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {

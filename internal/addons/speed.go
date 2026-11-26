@@ -85,9 +85,8 @@ func (Speed) Handle(ctx *core.Context) error {
 
 	var textoID string
 	if ctx.Client != nil {
-		resp, err := ctx.Client.SendMessage(context.Background(), ctx.ChatJID(), core.TextMessage("🚀 Iniciando Speedtest..."))
-		if err == nil {
-			textoID = string(resp.ID)
+		if id, err := wagoEnviarHook(ctx.Client, ctx.ChatJID(), core.TextMessage("🚀 Iniciando Speedtest...")); err == nil {
+			textoID = string(id)
 		}
 	} else {
 		_ = ctx.Reply("🚀 Iniciando Speedtest...")
@@ -118,12 +117,12 @@ func (Speed) Handle(ctx *core.Context) error {
 
 	if err != nil {
 		slog.Error("❌ [speed] Error del test:", "error", err)
-		return ctx.Reply("❌ Error al ejecutar el test.")
+		return wagoEditar(ctx, textoID, "❌ Error al ejecutar el test.")
 	}
 
 	text := "📊 *Resultado Speedtest*\n\n" +
 		fmt.Sprintf("⬇️ Descarga: *%s Mbps*\n", strconv.FormatFloat(result.Mbps, 'f', 2, 64)) +
 		fmt.Sprintf("⬆️ Subida: *%s Mbps*\n", strconv.FormatFloat(result.Mbps, 'f', 2, 64)) +
 		fmt.Sprintf("⏱️ Latencia: *%s ms*", strconv.FormatFloat(result.Latency, 'f', 0, 64))
-	return ctx.Reply(text)
+	return wagoEditar(ctx, textoID, text)
 }

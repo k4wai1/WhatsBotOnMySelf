@@ -65,7 +65,10 @@ type ytdlFormat struct {
 	Title          string       `json:"title"`
 	Duration       float64      `json:"duration"`
 	Channel        string       `json:"channel"`
+	ChannelTitle   string       `json:"channel_title"`
+	ChannelID      string       `json:"channel_id"`
 	Uploader       string       `json:"uploader"`
+	UploaderID     string       `json:"uploader_id"`
 	Thumbnail      string       `json:"thumbnail"`
 	Vcodec         string       `json:"vcodec"`
 	Acodec         string       `json:"acodec"`
@@ -666,15 +669,23 @@ func ytdlFindDenoDefault() string {
 		return p
 	}
 	home, _ := os.UserHomeDir()
+	if home == "" {
+		home = os.Getenv("HOME")
+	}
 	candidates := []string{
-		filepath.Join(home, ".deno/bin/deno"),
 		"/usr/local/bin/deno",
+	}
+	if home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".deno/bin/deno"),
+			filepath.Join(home, ".local/bin/deno"),
+		)
 	}
 	if matches, _ := filepath.Glob("/home/*/.deno/bin/deno"); len(matches) > 0 {
 		candidates = append(candidates, matches...)
 	}
 	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
 			return c
 		}
 	}
@@ -823,6 +834,16 @@ func ytdlYtdlp(args []string) (string, error) {
 	return stdout, nil
 }
 
+// ytdlAutor prioriza los campos que yt-dlp rellena con más frecuencia.
+func ytdlAutor(d ytdlFormat) string {
+	for _, v := range []string{d.Channel, d.Uploader, d.ChannelTitle, d.UploaderID, d.ChannelID} {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return "Desconocido"
+}
+
 func ytdlFetchVideoInfo(rawURL string) (ytdlInfo, error) {
 	stdout, err := ytdlYtdlp([]string{"--dump-json", "--no-warnings", "--no-playlist", rawURL})
 	if err != nil {
@@ -836,13 +857,7 @@ func ytdlFetchVideoInfo(rawURL string) (ytdlInfo, error) {
 	if title == "" {
 		title = "Sin título"
 	}
-	channel := data.Channel
-	if channel == "" {
-		channel = data.Uploader
-	}
-	if channel == "" {
-		channel = "Desconocido"
-	}
+	channel := ytdlAutor(data)
 	webpage := data.WebpageURL
 	if webpage == "" {
 		webpage = rawURL
@@ -877,13 +892,7 @@ func ytdlSearchYoutube(query string) ([]ytdlSearchResult, error) {
 		if title == "" {
 			title = "Sin título"
 		}
-		channel := d.Channel
-		if channel == "" {
-			channel = d.Uploader
-		}
-		if channel == "" {
-			channel = "Desconocido"
-		}
+		channel := ytdlAutor(d)
 		u := d.URL
 		if u == "" {
 			u = d.WebpageURL

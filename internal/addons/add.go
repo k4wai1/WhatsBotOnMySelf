@@ -125,6 +125,19 @@ func addCollect(collector *addCollector, client *whatsmeow.Client, msg *events.M
 
 	numbers := addNumbersFromMessage(msg.Message)
 	if len(numbers) == 0 {
+		if client != nil && collector.PromptID != "" {
+			_ = wagoEditarHook(client, collector.Chat, collector.PromptID, "❌ No se detectó un número válido.")
+		}
+		collector.Collected = true
+		if collector.Timer != nil {
+			collector.Timer.Stop()
+		}
+		if client != nil {
+			client.RemoveEventHandler(collector.Handler)
+		}
+		addMu.Lock()
+		delete(addCollectors, collector.Chat.String()+"|"+collector.Sender.String())
+		addMu.Unlock()
 		return
 	}
 	collector.Collected = true
@@ -132,12 +145,6 @@ func addCollect(collector *addCollector, client *whatsmeow.Client, msg *events.M
 		client.RemoveEventHandler(collector.Handler)
 	}
 
-	if len(numbers) == 0 {
-		return
-	}
-	// Nota: el contexto no está disponible aquí; se procesa en Handle cuando
-	// llega el texto por vía normal. La recolección de vCards se resuelve con
-	// el cliente directamente.
 	addProcessNumbers(client, collector, numbers)
 }
 

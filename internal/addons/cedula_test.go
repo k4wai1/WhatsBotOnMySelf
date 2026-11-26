@@ -77,6 +77,54 @@ func TestCedulaInvalida(t *testing.T) {
 	}
 }
 
+func TestCedulaDataFalseConErrorStr(t *testing.T) {
+	t.Setenv("CEDULA_APP_ID", "app")
+	t.Setenv("CEDULA_TOKEN", "token")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"error":true,"data":false,"error_str":"INVALID_TOKEN"}`))
+	}))
+	defer srv.Close()
+
+	prevURL, prevHTTP := cedulaURL, cedulaHTTP
+	cedulaURL = srv.URL
+	cedulaHTTP = srv.Client()
+	t.Cleanup(func() { cedulaURL, cedulaHTTP = prevURL, prevHTTP })
+
+	c := &capture{}
+	if err := (Cedula{}).Handle(c.newCtx("ci", "10854336")); err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if len(c.texts) != 1 || !strings.Contains(c.texts[0], "Token o App-ID inválido") {
+		t.Fatalf("textos=%#v", c.texts)
+	}
+}
+
+func TestCedulaHTTPInesperado(t *testing.T) {
+	t.Setenv("CEDULA_APP_ID", "app")
+	t.Setenv("CEDULA_TOKEN", "token")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`<html>proxy</html>`))
+	}))
+	defer srv.Close()
+
+	prevURL, prevHTTP := cedulaURL, cedulaHTTP
+	cedulaURL = srv.URL
+	cedulaHTTP = srv.Client()
+	t.Cleanup(func() { cedulaURL, cedulaHTTP = prevURL, prevHTTP })
+
+	c := &capture{}
+	if err := (Cedula{}).Handle(c.newCtx("ci", "10854336")); err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if len(c.texts) != 1 || !strings.Contains(c.texts[0], "HTTP 502") {
+		t.Fatalf("textos=%#v", c.texts)
+	}
+}
+
 func TestCedulaConsultaOK(t *testing.T) {
 	t.Setenv("CEDULA_APP_ID", "app")
 	t.Setenv("CEDULA_TOKEN", "token")

@@ -1,6 +1,9 @@
 package addons
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -170,5 +173,58 @@ func TestYtdlCancelSinSesion(t *testing.T) {
 	}
 	if len(textos) != 1 || !strings.Contains(textos[0], "No tienes ninguna descarga activa") {
 		t.Fatalf("textos=%#v", textos)
+	}
+}
+
+func TestYtdlAutorFallback(t *testing.T) {
+	casos := []struct {
+		d    ytdlFormat
+		want string
+	}{
+		{ytdlFormat{Channel: "Saintontas", Uploader: "Otro"}, "Saintontas"},
+		{ytdlFormat{ChannelTitle: "Wuthering Waves"}, "Wuthering Waves"},
+		{ytdlFormat{UploaderID: "@wutheringwaves"}, "@wutheringwaves"},
+		{ytdlFormat{ChannelID: "UC123"}, "UC123"},
+		{ytdlFormat{}, "Desconocido"},
+	}
+	for i, c := range casos {
+		if got := ytdlAutor(c.d); got != c.want {
+			t.Fatalf("caso %d: ytdlAutor=%q, esperaba %q", i, got, c.want)
+		}
+	}
+}
+
+func TestYtdlSearchUsaAutorFallback(t *testing.T) {
+	prevRun, prevFind, prevCookies := ytdlRunCommand, ytdlFindDeno, ytdlCookiePaths
+	ytdlFindDeno = func() string { return "" }
+	ytdlCookiePaths = func() []string { return nil }
+	ytdlRunCommand = func(_ context.Context, _ string, _ ...string) (string, string, error) {
+		return `{"id":"abc","title":"Video","uploader":"Subidor"}`, "", nil
+	}
+	t.Cleanup(func() { ytdlRunCommand, ytdlFindDeno, ytdlCookiePaths = prevRun, prevFind, prevCookies })
+
+	results, err := ytdlSearchYoutube("prueba")
+	if err != nil {
+		t.Fatalf("ytdlSearchYoutube error: %v", err)
+	}
+	if len(results) != 1 || results[0].Channel != "Subidor" {
+		t.Fatalf("resultados=%#v", results)
+	}
+}
+
+func TestYtdlFindDenoDesdeHome(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("PATH", "")
+	denoDir := filepath.Join(dir, ".deno", "bin")
+	if err := os.MkdirAll(denoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(denoDir, "deno")
+	if err := os.WriteFile(want, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := ytdlFindDenoDefault(); got != want {
+		t.Fatalf("deno=%q, esperaba %q", got, want)
 	}
 }

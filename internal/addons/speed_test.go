@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 )
 
 func TestSpeedCommands(t *testing.T) {
@@ -74,5 +76,40 @@ func TestSpeedHandlerTexto(t *testing.T) {
 	}
 	if len(c.texts) < 2 || !strings.Contains(c.texts[len(c.texts)-1], "Resultado Speedtest") {
 		t.Fatalf("textos=%#v", c.texts)
+	}
+}
+
+func TestSpeedEditaResultado(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(make([]byte, 128*1024))
+	}))
+	defer srv.Close()
+
+	prevURL, prevHTTP := speedURL, speedHTTP
+	speedURL = srv.URL
+	speedHTTP = srv.Client()
+	t.Cleanup(func() { speedURL, speedHTTP = prevURL, prevHTTP })
+
+	prevSend, prevEdit := wagoEnviarHook, wagoEditarHook
+	wagoEnviarHook = func(_ *whatsmeow.Client, _ types.JID, _ *waE2E.Message) (types.MessageID, error) {
+		return "ID-SPEED", nil
+	}
+	var editado string
+	wagoEditarHook = func(_ *whatsmeow.Client, _ types.JID, id, texto string) error {
+		editado = id + "|" + texto
+		return nil
+	}
+	t.Cleanup(func() { wagoEnviarHook, wagoEditarHook = prevSend, prevEdit })
+
+	t.Setenv("OWNER_NUMBERS", "58412345678")
+	ctx := wagoCtx("58412345678")
+	ctx.Command = "speed"
+	ctx.Client = &whatsmeow.Client{}
+	ctx.SendHook = func(*waE2E.Message) error { return nil }
+	if err := (Speed{}).Handle(ctx); err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	if !strings.HasPrefix(editado, "ID-SPEED|📊 *Resultado Speedtest*") {
+		t.Fatalf("edición inesperada: %q", editado)
 	}
 }
