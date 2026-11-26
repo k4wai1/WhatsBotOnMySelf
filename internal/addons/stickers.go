@@ -243,7 +243,7 @@ func stickersHas(args []string, v string) bool {
 }
 
 func stickersParseArgs(args []string) stickersArgs {
-	out := stickersArgs{Mode: "fluid", Shape: "none"}
+	out := stickersArgs{Mode: "default", Shape: "none"}
 	out.Crop = stickersHas(args, "crop") || stickersHas(args, "c")
 	out.Reverse = stickersHas(args, "reverse") || stickersHas(args, "r")
 	out.Stretch = stickersHas(args, "e") || stickersHas(args, "estirar")
@@ -432,31 +432,31 @@ func stickersFilterChain(isCrop bool, shapeMode string, isStretch bool) string {
 }
 
 func stickersCalcTargetFps(mode string, duration, sourceFps float64) int {
-	fps := 18
 	if mode == "high" {
 		switch {
 		case duration < 1.5:
-			fps = int(math.Min(30, sourceFps))
+			return int(math.Min(30, sourceFps))
 		case duration < 3.0:
-			fps = 24
+			return 24
 		case duration < 6.0:
-			fps = 20
+			return 20
 		default:
-			fps = 18
+			return 18
 		}
-		return fps
 	}
+	base := 8
 	switch {
 	case duration < 2.0:
-		fps = 24
+		base = 24
 	case duration < 4.0:
-		fps = 16
+		base = 16
 	case duration < 6.0:
-		fps = 12
-	default:
-		fps = 8
+		base = 12
 	}
-	return fps
+	if mode == "fluid" {
+		return int(math.Round(float64(base) * 1.25))
+	}
+	return base
 }
 
 // stickersProbeDefault usa ffprobe con los mismos datos que fluent-ffmpeg.

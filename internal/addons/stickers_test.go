@@ -26,8 +26,17 @@ func TestStickersParseArgs(t *testing.T) {
 	}
 
 	porDefecto := stickersParseArgs(stickersNormalizeArgs(nil))
-	if porDefecto.Crop || porDefecto.Reverse || porDefecto.Stretch || porDefecto.Shape != "none" || porDefecto.Mode != "fluid" {
+	if porDefecto.Crop || porDefecto.Reverse || porDefecto.Stretch || porDefecto.Shape != "none" || porDefecto.Mode != "default" {
 		t.Fatalf("defaults inesperados: %#v", porDefecto)
+	}
+
+	fluid := stickersParseArgs(stickersNormalizeArgs([]string{"f"}))
+	if fluid.Mode != "fluid" {
+		t.Fatalf("f debe activar el modo fluid con más frames: %#v", fluid)
+	}
+	fluidLargo := stickersParseArgs(stickersNormalizeArgs([]string{"fluid"}))
+	if fluidLargo.Mode != "fluid" {
+		t.Fatalf("fluid debe activar el modo fluid con más frames: %#v", fluidLargo)
 	}
 
 	esferico := stickersParseArgs(stickersNormalizeArgs([]string{"s"}))
@@ -70,10 +79,14 @@ func TestStickersCalcTargetFps(t *testing.T) {
 		source   float64
 		want     int
 	}{
-		{"fluid", 1, 30, 24},
-		{"fluid", 3, 30, 16},
-		{"fluid", 5, 30, 12},
-		{"fluid", 10, 30, 8},
+		{"default", 1, 30, 24},
+		{"default", 3, 30, 16},
+		{"default", 5, 30, 12},
+		{"default", 10, 30, 8},
+		{"fluid", 1, 30, 30},
+		{"fluid", 3, 30, 20},
+		{"fluid", 5, 30, 15},
+		{"fluid", 10, 30, 10},
 		{"high", 1, 25, 25},
 		{"high", 2, 60, 24},
 		{"high", 5, 60, 20},
