@@ -92,7 +92,7 @@ func TestSaPlanLimits(t *testing.T) {
 		t.Fatalf("plan estático=%+v", estatico)
 	}
 	animado := saPlanFor(true)
-	if animado.SizeLimit != 500*1024 || animado.MaxAudio != 10 || !animado.Animated {
+	if animado.SizeLimit != 1024*1024 || animado.MaxAudio != 10 || !animado.Animated {
 		t.Fatalf("plan animado=%+v", animado)
 	}
 }
@@ -120,7 +120,7 @@ func TestSaCalcFPSAdaptativo(t *testing.T) {
 		}
 		anterior = actual
 	}
-	if saCalcFPS(0.5) != 20 || saCalcFPS(9) != 10 {
+	if saCalcFPS(0.5) != 20 || saCalcFPS(9) != 12 {
 		t.Fatalf("extremos inesperados: %d/%d", saCalcFPS(0.5), saCalcFPS(9))
 	}
 }
@@ -129,7 +129,7 @@ func TestSaQualityRange(t *testing.T) {
 	if min, max := saQualityRange(false); min != 10 || max != 100 {
 		t.Fatalf("estático=(%d,%d)", min, max)
 	}
-	if min, max := saQualityRange(true); min != 0 || max != 100 {
+	if min, max := saQualityRange(true); min != 20 || max != 100 {
 		t.Fatalf("animado=(%d,%d)", min, max)
 	}
 }
@@ -665,6 +665,9 @@ func TestSaCalcFPSMode(t *testing.T) {
 	if got := saCalcFPSMode("high", 9); got != 18 {
 		t.Fatalf("modo high largo=%d, esperaba 18", got)
 	}
+	if saCalcFPS(1) <= saCalcFPS(9) {
+		t.Fatal("la curva debe reducir fps al alargar el video")
+	}
 }
 
 // TestSaBuildWebPTransformacionesFFmpeg valida los filtros de `.st` sobre una
@@ -728,10 +731,29 @@ func TestSaPackDefaults(t *testing.T) {
 }
 
 func TestSaLimitesStickerAudioAnimado(t *testing.T) {
-	if saAnimatedMaxAudio != 10 || saMaxVideoSeconds != 10 {
-		t.Fatalf("topes=%v/%v, esperaba 10/10", saAnimatedMaxAudio, saMaxVideoSeconds)
+	if saAudioBitrateKbps != 64 || saMaxVideoSeconds != 10 {
+		t.Fatalf("bitrate=%v, tope=%v, esperaba 64/10", saAudioBitrateKbps, saMaxVideoSeconds)
 	}
 	if saClampDuration(12, saMaxVideoSeconds) != 10 {
 		t.Fatal("la duración animada debía acotarse a 10 s")
+	}
+}
+
+func TestSaExifOverhead(t *testing.T) {
+	overhead := saExifOverhead()
+	if overhead <= 0 || overhead > 8*1024 {
+		t.Fatalf("overhead inesperado: %d", overhead)
+	}
+}
+
+func TestSaCurvaCalidad10s(t *testing.T) {
+	if saCalcFPS(1) <= saCalcFPS(10) {
+		t.Fatal("la curva debe bajar fps al alargar el video")
+	}
+	if saCalcFPSMode("high", 1) <= saCalcFPSMode("high", 10) {
+		t.Fatal("el modo high debe bajar fps al alargar el video")
+	}
+	if _, max := saQualityRange(true); max != 100 {
+		t.Fatalf("calidad máxima=%d, esperaba 100", max)
 	}
 }

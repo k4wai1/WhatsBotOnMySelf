@@ -38,9 +38,9 @@ import (
 const (
 	saSize             = 512
 	saStaticLimit      = 100 * 1024
-	saAnimatedLimit    = 500 * 1024
+	saAnimatedLimit    = 1024 * 1024
 	saStaticMaxAudio   = 10.0
-	saAnimatedMaxAudio = 10.0
+	saAudioBitrateKbps = 64
 	saMaxVideoSeconds  = 10.0
 	saSessionTTL       = 2 * time.Minute
 	saDefaultCooldown  = 15 * time.Second
@@ -325,38 +325,35 @@ type saPlan struct {
 
 func saPlanFor(animated bool) saPlan {
 	if animated {
-		return saPlan{Animated: true, SizeLimit: saAnimatedLimit, MaxAudio: saAnimatedMaxAudio}
+		return saPlan{Animated: true, SizeLimit: saAnimatedLimit, MaxAudio: saMaxVideoSeconds}
 	}
 	return saPlan{Animated: false, SizeLimit: saStaticLimit, MaxAudio: saStaticMaxAudio}
 }
 
-// saCalcFPS replica la compresión adaptativa de stickers.go, acotada a 10 s.
+// saCalcFPS replica la curva adaptativa de stickers.go para videos de hasta
+// 10 s: mas fps en clips cortos y menos en largos para no exceder el peso.
 func saCalcFPS(duration float64) int {
 	switch {
-	case duration < 1.5:
-		return 20
 	case duration < 3.0:
+		return 20
+	case duration < 6.0:
 		return 16
-	case duration < 5.0:
-		return 12
 	default:
-		return 10
+		return 12
 	}
 }
 
-// saCalcFPSMode aplica el modo `high` de `.st` (más fps) sobre el esquema
+// saCalcFPSMode aplica el modo `high` de `.st` (mas fps) sobre el esquema
 // adaptativo de `.sa`, siempre acotado al tope de 10 s.
 func saCalcFPSMode(mode string, duration float64) int {
 	if mode != "high" {
 		return saCalcFPS(duration)
 	}
 	switch {
-	case duration < 1.5:
-		return 30
 	case duration < 3.0:
+		return 30
+	case duration < 6.0:
 		return 24
-	case duration < 5.0:
-		return 20
 	default:
 		return 18
 	}
@@ -364,7 +361,7 @@ func saCalcFPSMode(mode string, duration float64) int {
 
 func saQualityRange(animated bool) (int, int) {
 	if animated {
-		return 0, 100
+		return 20, 100
 	}
 	return 10, 100
 }
@@ -543,7 +540,7 @@ func saEncodeAnimatedWebP(inputPath, outputPath string, start, duration float64,
 		duration = saMaxVideoSeconds
 	}
 	// Al invertir el bucle la duración final se duplica: recortamos la fuente
-	// para no superar el tope de 10 s.
+	// para no superar el tope de 10 s. En modo high se prioriza fluidez.
 	if a.Reverse && duration > saMaxVideoSeconds/2 {
 		duration = saMaxVideoSeconds / 2
 	}
@@ -669,7 +666,7 @@ func saExtractOGG(inputPath, outputPath string, start, duration float64) error {
 	}
 	args = append(args, "-i", inputPath,
 		"-t", saFormatFloat(duration), "-vn", "-map", "0:a:0",
-		"-c:a", "libopus", "-ac", "1", "-ar", "48000", "-b:a", "64k",
+		"-c:a", "libopus", "-ac", "1", "-ar", "48000", "-b:a", strconv.Itoa(saAudioBitrateKbps)+"k",
 		"-avoid_negative_ts", "make_zero", outputPath)
 	return saRunFFmpeg(args...)
 }
@@ -737,6 +734,11 @@ func saExifBlob(pack, publisher string) []byte {
 }
 
 // saApplyExif inyecta metadatos si webpmux está disponible; si no, no-op.
+// saExifOverhead estima los bytes que webpmux añade al incrustar el EXIF.
+func saExifOverhead() int {
+	return 8 + len(saExifBlob(saPackName(), saPackPublisher()))
+}
+
 func saApplyExif(webp []byte) []byte {
 	if _, err := saLookPath("webpmux"); err != nil {
 		return webp
@@ -1165,7 +1167,7 @@ func (a *saAddon) Handle(ctx *core.Context) error {
 			if visual == nil {
 				visual = &saVisual{Data: videoBytes, Mimetype: "video/mp4", Animated: true, IsVideo: true}
 			}
-			videoAudioMax := saAnimatedMaxAudio
+			videoAudioMax := saMaxVideoSeconds
 			if args.Duration > 0 && args.Duration < videoAudioMax {
 				videoAudioMax = args.Duration
 			}
@@ -1309,7 +1311,7 @@ func saBuildWebP(v *saVisual, plan saPlan, args saArgs, start, duration float64)
 
 	// Solo se reutiliza el WebP original si no hay transformaciones pedidas.
 	if v.IsSticker && !saNeedsVisualTransform(args) && !args.Reverse {
-		if w, h, ok := saWebPDims(v.Data); ok && w == saSize && h == saSize && len(v.Data) <= plan.SizeLimit {
+		if w, h, ok := saWebPDims(v.Data); ok && w == saSize && h == saSize && len(v.Data)+saExifOverhead() <= plan.SizeLimit {
 			if out := saApplyExif(v.Data); len(out) <= plan.SizeLimit {
 				return out, nil
 			}
@@ -1340,8 +1342,10 @@ func saBuildWebP(v *saVisual, plan saPlan, args saArgs, start, duration float64)
 		return nil, fmt.Errorf("el WebP (%d KB) supera el límite de %d KB", len(webp)/1024, plan.SizeLimit/1024)
 	}
 
-	if out := saApplyExif(webp); len(out) > 0 && len(out) <= plan.SizeLimit {
-		webp = out
+	if len(webp)+saExifOverhead() <= plan.SizeLimit {
+		if out := saApplyExif(webp); len(out) > 0 && len(out) <= plan.SizeLimit {
+			webp = out
+		}
 	}
 	return webp, nil
 }
