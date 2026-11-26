@@ -33,6 +33,10 @@ type Context struct {
 	// necesitar una conexión real con WhatsApp.
 	SendHook  func(msg *waE2E.Message) error
 	ReactHook func(emoji string) error
+
+	// SendIDHook y RevokeHook permiten capturar IDs y revocaciones en pruebas.
+	SendIDHook func(msg *waE2E.Message) (types.MessageID, error)
+	RevokeHook func(id types.MessageID) error
 }
 
 // Addon es un comando registrable.
@@ -88,6 +92,49 @@ func (c *Context) SendMessage(msg *waE2E.Message) error {
 		return nil
 	}
 	_, err := c.Client.SendMessage(context.Background(), c.Message.Info.Chat, msg)
+	return err
+}
+
+// SendTextID envía texto y devuelve el ID del mensaje creado.
+func (c *Context) SendTextID(text string) (types.MessageID, error) {
+	return c.sendWithID(TextMessage(text))
+}
+
+// sendWithID envía un mensaje y devuelve el ID cuando la API lo expone.
+func (c *Context) sendWithID(msg *waE2E.Message) (types.MessageID, error) {
+	if msg == nil {
+		return "", nil
+	}
+	if c.SendIDHook != nil {
+		return c.SendIDHook(msg)
+	}
+	if c.SendHook != nil {
+		return "", c.SendHook(msg)
+	}
+	if c.Client == nil || c.Message == nil {
+		return "", nil
+	}
+	resp, err := c.Client.SendMessage(context.Background(), c.Message.Info.Chat, msg)
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
+// RevokeMessage elimina (revoca) un mensaje propio por ID.
+func (c *Context) RevokeMessage(id types.MessageID) error {
+	if id == "" {
+		return nil
+	}
+	if c.RevokeHook != nil {
+		return c.RevokeHook(id)
+	}
+	if c.Client == nil || c.Message == nil {
+		return nil
+	}
+	chat := c.Message.Info.Chat
+	_, err := c.Client.SendMessage(context.Background(), chat,
+		c.Client.BuildRevoke(chat, types.EmptyJID, id))
 	return err
 }
 

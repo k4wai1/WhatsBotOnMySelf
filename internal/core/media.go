@@ -20,15 +20,33 @@ import (
 
 // SendImage sube y envía una imagen, con caption opcional.
 func (c *Context) SendImage(data []byte, caption string) error {
+	msg, err := c.buildImageMessage(data, caption)
+	if err != nil {
+		return err
+	}
+	_, err = c.sendWithID(msg)
+	return err
+}
+
+// SendImageID es SendImage pero devuelve el ID del mensaje enviado.
+func (c *Context) SendImageID(data []byte, caption string) (types.MessageID, error) {
+	msg, err := c.buildImageMessage(data, caption)
+	if err != nil {
+		return "", err
+	}
+	return c.sendWithID(msg)
+}
+
+func (c *Context) buildImageMessage(data []byte, caption string) (*waE2E.Message, error) {
 	if len(data) == 0 {
-		return fmt.Errorf("imagen vacía")
+		return nil, fmt.Errorf("imagen vacía")
 	}
 	width, height := imageSize(data)
 	resp, err := c.upload(data, whatsmeow.MediaImage)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	msg := &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+	return &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
 		URL:           proto.String(resp.URL),
 		Mimetype:      proto.String(detectMime(data, "image/jpeg")),
 		Caption:       optString(caption),
@@ -39,8 +57,7 @@ func (c *Context) SendImage(data []byte, caption string) error {
 		DirectPath:    proto.String(resp.DirectPath),
 		Width:         proto.Uint32(width),
 		Height:        proto.Uint32(height),
-	}}
-	return c.SendMessage(msg)
+	}}, nil
 }
 
 // SendVideo sube y envía un video.

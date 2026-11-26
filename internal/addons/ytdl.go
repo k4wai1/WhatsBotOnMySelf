@@ -1,15 +1,12 @@
 package addons
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,76 +14,64 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 
 	"whatsbot-go/internal/core"
 	"whatsbot-go/internal/store"
 )
 
 func init() {
-	core.Register(Ytdl{})
+	core.Register(newYtdlAddon())
 	core.RegisterBackground("ytdl", ytdlInit)
 }
 
 const (
-	ytdlWarnSize       = 60 * 1024 * 1024
+	ytdlExecTimeout    = 5 * time.Minute
+	ytdlThumbTimeout   = 5 * time.Second
 	ytdlSessionTTL     = 10 * time.Minute
 	ytdlTmpMaxAge      = 3 * time.Hour
 	ytdlUpdateInterval = 24 * time.Hour
+	ytdlWarnSize       = 60 * 1024 * 1024
 )
 
 var ytdlResTiers = []int{4320, 2160, 1440, 1080, 720, 480, 360, 240, 144}
 
-// Inyectables para pruebas.
-var (
-	ytdlTmpBase     = func() string { return filepath.Join(os.TempDir(), "ytdl") }
-	ytdlCookiePaths = ytdlCookiePathsDefault
-	ytdlFindDeno    = ytdlFindDenoDefault
-	ytdlRunCommand  = ytdlRunCommandDefault
-	ytdlHTTPClient  = &http.Client{Timeout: 8 * time.Second}
-	ytdlNow         = time.Now
-	ytdlFetchInfo   = ytdlFetchVideoInfo
-	ytdlSearchFn    = ytdlSearchYoutube
-	ytdlDownloadFn  = ytdlDownloadMedia
-	ytdlSendMenuFn  = ytdlSendMenuWithThumbnail
-	ytdlMkdirTemp   = os.MkdirTemp
-	ytdlRemoveAll   = os.RemoveAll
-)
-
-var (
-	ytdlMu       sync.RWMutex
-	ytdlSessions = make(map[string]*ytdlSession)
-	ytdlSearches = make(map[string]*ytdlSearchSession)
-)
+type ytdlThumbnail struct {
+	URL string `json:"url"`
+}
 
 type ytdlFormat struct {
-	ID             string       `json:"id"`
-	URL            string       `json:"url"`
-	WebpageURL     string       `json:"webpage_url"`
-	Title          string       `json:"title"`
-	Duration       float64      `json:"duration"`
-	Channel        string       `json:"channel"`
-	ChannelTitle   string       `json:"channel_title"`
-	ChannelID      string       `json:"channel_id"`
-	Uploader       string       `json:"uploader"`
-	UploaderID     string       `json:"uploader_id"`
-	Thumbnail      string       `json:"thumbnail"`
-	Vcodec         string       `json:"vcodec"`
-	Acodec         string       `json:"acodec"`
-	Height         int          `json:"height"`
-	TBR            float64      `json:"tbr"`
-	Filesize       int64        `json:"filesize"`
-	FilesizeApprox int64        `json:"filesize_approx"`
-	Formats        []ytdlFormat `json:"formats"`
+	ID               string          `json:"id"`
+	URL              string          `json:"url"`
+	WebpageURL       string          `json:"webpage_url"`
+	Title            string          `json:"title"`
+	Duration         float64         `json:"duration"`
+	Channel          string          `json:"channel"`
+	ChannelTitle     string          `json:"channel_title"`
+	ChannelID        string          `json:"channel_id"`
+	Uploader         string          `json:"uploader"`
+	UploaderID       string          `json:"uploader_id"`
+	PlaylistChannel  string          `json:"playlist_channel"`
+	PlaylistUploader string          `json:"playlist_uploader"`
+	Creators         []string        `json:"creators"`
+	Thumbnail        string          `json:"thumbnail"`
+	Thumbnails       []ytdlThumbnail `json:"thumbnails"`
+	Vcodec           string          `json:"vcodec"`
+	Acodec           string          `json:"acodec"`
+	Height           int             `json:"height"`
+	TBR              float64         `json:"tbr"`
+	Filesize         int64           `json:"filesize"`
+	FilesizeApprox   int64           `json:"filesize_approx"`
+	Formats          []ytdlFormat    `json:"formats"`
 }
 
 type ytdlInfo struct {
 	ID         string       `json:"id"`
 	Title      string       `json:"title"`
-	Duration   float64      `json:"duration"`
 	Channel    string       `json:"channel"`
-	Uploader   string       `json:"uploader"`
 	Thumbnail  string       `json:"thumbnail"`
 	WebpageURL string       `json:"webpage_url"`
+	Duration   float64      `json:"duration"`
 	Formats    []ytdlFormat `json:"formats"`
 }
 
@@ -102,101 +87,158 @@ type ytdlSearchResult struct {
 	ID        string  `json:"id"`
 	Title     string  `json:"title"`
 	URL       string  `json:"url"`
-	Duration  float64 `json:"duration"`
 	Channel   string  `json:"channel"`
 	Thumbnail string  `json:"thumbnail"`
+	Duration  float64 `json:"duration"`
 }
 
 type ytdlSession struct {
 	Info      ytdlInfo
 	Options   []ytdlOption
+	MenuMsgID types.MessageID
 	CreatedAt time.Time
 }
 
 type ytdlSearchSession struct {
 	Results   []ytdlSearchResult
+	MenuMsgID types.MessageID
 	CreatedAt time.Time
 }
 
-// Ytdl porta addons/ytdl.js.
-type Ytdl struct{}
+type ytdlService struct {
+	Client   *ytdlClient
+	Sessions *ytdlSessionStore
+}
+
+// Ytdl porta addons/ytdl.js. El receiver por valor es requerido por el
+// registro genérico de addons (registry_test.go usa Ytdl{}).
+type Ytdl struct {
+	Svc *ytdlService
+}
+
+var (
+	defaultYtdlOnce sync.Once
+	defaultYtdlSvc  *ytdlService
+)
+
+func defaultYtdlService() *ytdlService {
+	defaultYtdlOnce.Do(func() {
+		defaultYtdlSvc = &ytdlService{
+			Client:   NewYtdlClient(),
+			Sessions: NewYtdlSessionStore(time.Now),
+		}
+	})
+	return defaultYtdlSvc
+}
+
+func newYtdlAddon() *Ytdl { return &Ytdl{Svc: defaultYtdlService()} }
+
+func (y Ytdl) service() *ytdlService {
+	if y.Svc != nil {
+		return y.Svc
+	}
+	return defaultYtdlService()
+}
 
 // Commands cumple core.Addon (incluye los alias originales).
 func (Ytdl) Commands() []string { return []string{"ytdl", "ytdlp", "yt", "youtube"} }
 
-// Handle replica el flujo interactivo de descarga/búsqueda.
-func (Ytdl) Handle(ctx *core.Context) error {
+// ytdlPrefix compone el prefijo dinámico del router (ej. ".ytdl", "!yt").
+func ytdlPrefix(ctx *core.Context) string {
+	if ctx == nil {
+		return ".yt"
+	}
+	prefix := strings.TrimSpace(ctx.Prefix + ctx.Command)
+	if prefix == "" {
+		return ".yt"
+	}
+	return prefix
+}
+
+// Handle replica el flujo interactivo de descarga/búsqueda con menús revocables.
+func (y Ytdl) Handle(ctx *core.Context) error {
 	if ctx == nil {
 		return nil
 	}
+	svc := y.service()
+	prefix := ytdlPrefix(ctx)
+
 	sender := ctx.SenderJID().String()
-	jid := ctx.ChatJID().String()
 	if sender == "" {
-		sender = jid
+		sender = ctx.ChatJID().String()
 	}
 
-	compressFlag := false
+	compress := false
 	cleanArgs := make([]string, 0, len(ctx.Args))
-	for _, a := range ctx.Args {
-		if a == "c" || a == "zip" || a == "comp" {
-			compressFlag = true
+	for _, arg := range ctx.Args {
+		if a := strings.ToLower(strings.TrimSpace(arg)); a == "c" || a == "zip" || a == "comp" {
+			compress = true
 			continue
 		}
-		cleanArgs = append(cleanArgs, a)
+		cleanArgs = append(cleanArgs, arg)
 	}
-
 	first := ""
 	if len(cleanArgs) > 0 {
 		first = cleanArgs[0]
 	}
 
-	// ─── CASO 1: cancelar ───────────────────────────────────────────────
-	if strings.ToLower(first) == "cancel" {
-		hadSession := ytdlCancel(sender)
-		if hadSession {
+	// ─── Cancelar ────────────────────────────────────────────────────────
+	if strings.EqualFold(first, "cancel") {
+		ids, had := svc.Sessions.Cancel(sender)
+		for _, id := range ids {
+			ytdlRevokeMenu(ctx, id)
+		}
+		if had {
 			return ytdlReply(ctx, "✅ Descarga/Búsqueda cancelada.")
 		}
-		return ytdlReply(ctx, "❌ No tienes ninguna descarga activa.")
+		return ytdlReply(ctx, "❌ No tienes nada activo para cancelar.")
 	}
 
+	// ─── Selección numérica ──────────────────────────────────────────────
 	selection, hasSelection := ytdlParseInt(first)
-
-	// ─── CASO 2: selección de una sesión de descarga ────────────────────
 	if hasSelection {
-		if session, ok := ytdlTakeSession(sender); ok {
-			return ytdlHandleFormatSelection(ctx, session, selection, compressFlag)
+		if session, ok := svc.Sessions.PeekDownload(sender); ok {
+			if selection < 1 || selection > len(session.Options) {
+				return ytdlInvalidSelection(ctx, len(session.Options), prefix)
+			}
+			ytdlRevokeMenu(ctx, session.MenuMsgID)
+			if _, ok := svc.Sessions.TakeDownload(sender); !ok {
+				return ytdlReply(ctx, "❌ Tu sesión expiró. Vuelve a intentarlo.")
+			}
+			return ytdlDownloadSelected(ctx, svc, session, selection, compress)
+		}
+		if search, ok := svc.Sessions.PeekSearch(sender); ok {
+			if selection < 1 || selection > len(search.Results) {
+				return ytdlInvalidSelection(ctx, len(search.Results), prefix)
+			}
+			chosen := search.Results[selection-1]
+			ytdlRevokeMenu(ctx, search.MenuMsgID)
+			if _, ok := svc.Sessions.TakeSearch(sender); !ok {
+				return ytdlReply(ctx, "❌ Tu sesión expiró. Vuelve a intentarlo.")
+			}
+			return ytdlFetchAndStore(ctx, svc, sender, prefix, chosen.URL)
 		}
 	}
 
-	// ─── CASO 2b: selección de un resultado de búsqueda ─────────────────
-	if hasSelection {
-		if search, ok := ytdlTakeSearch(sender); ok {
-			return ytdlHandleSearchSelection(ctx, sender, jid, search, selection)
-		}
-	}
-
-	// ─── CASO 3: nueva descarga o búsqueda ──────────────────────────────
-	rawURL := strings.TrimSpace(strings.Join(cleanArgs, " "))
-	if rawURL == "" {
+	raw := strings.TrimSpace(strings.Join(cleanArgs, " "))
+	if raw == "" {
 		if err := ctx.React("❓"); err != nil {
 			return err
 		}
-		return ytdlReply(ctx, ytdlHelpText)
+		return ytdlReply(ctx, ytdlHelpText(prefix))
 	}
 
-	lower := strings.ToLower(rawURL)
+	lower := strings.ToLower(raw)
 	isDirect := strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
 
+	// ─── Búsqueda ────────────────────────────────────────────────────────
 	if !isDirect {
 		if err := ctx.React("🔍"); err != nil {
 			return err
 		}
-		results, err := ytdlSearchFn(rawURL)
+		results, err := svc.Client.Search(raw)
 		if err != nil {
-			if reactErr := ctx.React("❌"); reactErr != nil {
-				return reactErr
-			}
-			return ytdlReply(ctx, "❌ Error en la búsqueda: "+ytdlTruncate(err.Error(), 200))
+			return ytdlSendError(ctx, svc.Client, err)
 		}
 		if len(results) == 0 {
 			if reactErr := ctx.React("❌"); reactErr != nil {
@@ -204,159 +246,188 @@ func (Ytdl) Handle(ctx *core.Context) error {
 			}
 			return ytdlReply(ctx, "❌ No se encontraron resultados para esa búsqueda.")
 		}
-		ytdlStoreSearch(sender, results)
-		if err := ytdlReply(ctx, ytdlSearchMenu(results)); err != nil {
+		caption := ytdlSearchMenu(results, prefix)
+		mosaic, mosaicErr := ytdlBuildMosaic(results, svc.Client.HTTPClient)
+		var id types.MessageID
+		if mosaicErr != nil || len(mosaic) == 0 {
+			id, err = ctx.SendTextID(caption)
+		} else {
+			id, err = ctx.SendImageID(mosaic, caption)
+		}
+		if err != nil {
+			return err
+		}
+		svc.Sessions.StoreSearch(sender, &ytdlSearchSession{
+			Results:   results,
+			MenuMsgID: id,
+			CreatedAt: svc.Sessions.now(),
+		})
+		return ctx.React("✅")
+	}
+
+	// ─── URL directa ─────────────────────────────────────────────────────
+	return ytdlFetchAndStore(ctx, svc, sender, prefix, raw)
+}
+
+func ytdlFetchAndStore(ctx *core.Context, svc *ytdlService, sender, prefix, rawURL string) error {
+	if err := ctx.React("⏳"); err != nil {
+		return err
+	}
+	info, err := svc.Client.FetchInfo(rawURL)
+	if err != nil {
+		return ytdlSendError(ctx, svc.Client, err)
+	}
+	options := ytdlBuildFormatOptions(info)
+	if len(options) == 0 {
+		if reactErr := ctx.React("❌"); reactErr != nil {
+			return reactErr
+		}
+		return ytdlReply(ctx, "❌ No se encontraron formatos descargables para este video.")
+	}
+	menu := ytdlMenuText(info, options, prefix)
+	msgID, err := ytdlSendMenu(ctx, svc.Client, menu, info.Thumbnail)
+	if err != nil {
+		return err
+	}
+	svc.Sessions.StoreDownload(sender, &ytdlSession{
+		Info:      info,
+		Options:   options,
+		MenuMsgID: msgID,
+		CreatedAt: svc.Sessions.now(),
+	})
+	return ctx.React("✅")
+}
+
+func ytdlDownloadSelected(ctx *core.Context, svc *ytdlService, session *ytdlSession, selection int, compress bool) error {
+	selected := session.Options[selection-1]
+	if err := ctx.React("⏳"); err != nil {
+		return err
+	}
+
+	tmpDir, err := svc.Client.MkdirTemp(svc.Client.TmpBase(), "dl-")
+	if err != nil {
+		return ytdlDownloadError(ctx, err)
+	}
+	defer func() { _ = svc.Client.RemoveAll(tmpDir) }()
+
+	downloaded, err := svc.Client.Download(session.Info.WebpageURL, selected.FormatSpec, tmpDir, selected.IsAudio)
+	if err != nil {
+		return ytdlDownloadError(ctx, err)
+	}
+	stat, err := os.Stat(downloaded)
+	if err != nil {
+		return ytdlDownloadError(ctx, err)
+	}
+	data, err := os.ReadFile(downloaded)
+	if err != nil {
+		return ytdlDownloadError(ctx, err)
+	}
+
+	if compress {
+		name := filepath.Base(downloaded)
+		zipData, err := YtdlZipBytes(map[string][]byte{name: data})
+		if err != nil {
+			return ytdlDownloadError(ctx, err)
+		}
+		if err := ctx.SendDocument(zipData, "video_"+session.Info.ID+".zip", ""); err != nil {
 			return err
 		}
 		return ctx.React("✅")
 	}
 
-	// Verificar cookies antes de empezar.
-	cookiesAvailable := false
-	for _, f := range ytdlCookiePaths() {
-		if _, err := os.Stat(f); err == nil {
-			cookiesAvailable = true
-			break
-		}
-	}
-	if !cookiesAvailable {
-		if err := ctx.React("⏳"); err != nil {
-			return err
-		}
-		if err := ytdlReply(ctx, "⚠️ No se encontró archivo de cookies.\nVideos restringidos pueden fallar.\nGuía: coloca `assets/www.youtube.com_cookies.json` con cookies exportadas (formato JSON o Netscape)."); err != nil {
-			return err
-		}
-	} else {
-		if err := ctx.React("⏳"); err != nil {
-			return err
-		}
-	}
-
-	info, err := ytdlFetchInfo(rawURL)
-	if err != nil {
-		return ytdlSendError(ctx, err)
-	}
-	options := ytdlBuildFormatOptions(info)
-	if len(options) == 0 {
-		if reactErr := ctx.React("❌"); reactErr != nil {
-			return reactErr
-		}
-		return ytdlReply(ctx, "❌ No se encontraron formatos descargables para este video.")
-	}
-	ytdlStoreSession(sender, info, options)
-	if err := ytdlSendMenuFn(ctx, jid, ytdlMenuText(info, options), info.Thumbnail); err != nil {
-		return err
-	}
-	return ctx.React("✅")
-}
-
-func ytdlHandleFormatSelection(ctx *core.Context, session *ytdlSession, selection int, compress bool) error {
-	options := session.Options
-	if selection < 1 || selection > len(options) {
-		if err := ctx.React("❓"); err != nil {
-			return err
-		}
-		return ytdlReply(ctx, fmt.Sprintf("❌ Número inválido. Elige entre 1 y %d.\nUsa `.ytdl cancel` para salir.", len(options)))
-	}
-	selected := options[selection-1]
-	if err := ctx.React("⏳"); err != nil {
-		return err
-	}
-
-	tmpDir, err := ytdlMkdirTemp(ytdlTmpBase(), "dl-")
-	if err != nil {
-		return ytdlDownloadError(ctx, err)
-	}
-	defer ytdlRemoveAll(tmpDir)
-
-	downloaded, err := ytdlDownloadFn(session.Info.WebpageURL, selected.FormatSpec, tmpDir)
-	if err != nil {
-		return ytdlDownloadError(ctx, err)
-	}
-	info, err := os.Stat(downloaded)
-	if err != nil {
-		return ytdlDownloadError(ctx, err)
-	}
-	fileSize := info.Size()
-
-	sendPath := downloaded
-	isCompressed := false
-	if compress {
-		zipPath := downloaded + ".zip"
-		if _, _, err := ytdlRunCommand(context.Background(), "zip", "-9", "-j", zipPath, downloaded); err != nil {
-			return ytdlDownloadError(ctx, err)
-		}
-		if st, err := os.Stat(zipPath); err == nil {
-			fileSize = st.Size()
-		}
-		sendPath = zipPath
-		isCompressed = true
-	}
-
-	data, err := os.ReadFile(sendPath)
-	if err != nil {
-		return ytdlDownloadError(ctx, err)
-	}
-	ext := strings.ToLower(filepath.Ext(sendPath))
-
-	if isCompressed {
-		if err := ctx.SendDocument(data, "video_"+session.Info.ID+".zip", ""); err != nil {
-			return err
-		}
-	} else if selected.IsAudio {
+	if selected.IsAudio {
 		if err := ctx.SendAudio(data, "audio/mpeg", false, 0); err != nil {
 			return err
 		}
-	} else if ext == ".mp4" || ext == ".webm" || ext == ".mkv" {
-		actualExt := ext
-		if ext == ".mkv" || ext == ".webm" {
-			actualExt = ".mp4"
-		}
-		if fileSize > ytdlWarnSize {
-			if err := ctx.SendDocument(data, "video_"+session.Info.ID+actualExt, ""); err != nil {
-				return err
-			}
-		} else {
-			if err := ctx.SendVideo(data, "📹 "+session.Info.Title, false); err != nil {
-				return err
-			}
-		}
 	} else {
-		if err := ctx.SendDocument(data, filepath.Base(sendPath), ""); err != nil {
-			return err
+		ext := strings.ToLower(filepath.Ext(downloaded))
+		switch ext {
+		case ".mp4", ".webm", ".mkv":
+			if stat.Size() > ytdlWarnSize {
+				actualExt := ext
+				if ext == ".mkv" || ext == ".webm" {
+					actualExt = ".mp4"
+				}
+				if err := ctx.SendDocument(data, "video_"+session.Info.ID+actualExt, ""); err != nil {
+					return err
+				}
+			} else {
+				if err := ctx.SendVideo(data, "📹 "+session.Info.Title, false); err != nil {
+					return err
+				}
+			}
+		default:
+			if err := ctx.SendDocument(data, filepath.Base(downloaded), ""); err != nil {
+				return err
+			}
 		}
 	}
 	return ctx.React("✅")
 }
 
-func ytdlHandleSearchSelection(ctx *core.Context, sender, jid string, search *ytdlSearchSession, selection int) error {
-	results := search.Results
-	if selection < 1 || selection > len(results) {
-		if err := ctx.React("❓"); err != nil {
-			return err
+func ytdlSendMenu(ctx *core.Context, client *ytdlClient, menu, thumbnailURL string) (types.MessageID, error) {
+	if thumbnailURL != "" && client != nil && client.HTTPClient != nil {
+		reqCtx, cancel := context.WithTimeout(context.Background(), ytdlThumbTimeout)
+		defer cancel()
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, thumbnailURL, nil)
+		if err == nil {
+			resp, err := client.HTTPClient.Do(req)
+			if err == nil {
+				defer resp.Body.Close()
+				if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+					data, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+					if readErr == nil && len(data) > 0 {
+						if id, sendErr := ctx.SendImageID(data, menu); sendErr == nil {
+							return id, nil
+						}
+					}
+				}
+			}
 		}
-		return ytdlReply(ctx, fmt.Sprintf("❌ Número inválido. Elige entre 1 y %d.\nUsa `.ytdl cancel` para salir.", len(results)))
 	}
-	selected := results[selection-1]
-	if err := ctx.React("⏳"); err != nil {
+	return ctx.SendTextID(menu)
+}
+
+func ytdlRevokeMenu(ctx *core.Context, id types.MessageID) {
+	if id == "" {
+		return
+	}
+	if err := ctx.RevokeMessage(id); err != nil {
+		slog.Debug("ytdl: no se pudo revocar el menú", "id", id, "error", err)
+	}
+}
+
+func ytdlReply(ctx *core.Context, text string) error {
+	return ctx.SendText(text)
+}
+
+func ytdlSendError(ctx *core.Context, client *ytdlClient, err error) error {
+	if reactErr := ctx.React("❌"); reactErr != nil {
+		return reactErr
+	}
+	return ytdlReply(ctx, YtdlErrorText(err, ytdlRuntimeHint(client)))
+}
+
+func ytdlRuntimeHint(client *ytdlClient) string {
+	if client == nil || client.FindRuntime == nil {
+		return ""
+	}
+	deno, node := client.FindRuntime()
+	switch {
+	case strings.TrimSpace(deno) != "":
+		return "Deno: " + deno
+	case strings.TrimSpace(node) != "":
+		return "Node: " + node
+	default:
+		return ""
+	}
+}
+
+func ytdlInvalidSelection(ctx *core.Context, max int, prefix string) error {
+	if err := ctx.React("❓"); err != nil {
 		return err
 	}
-	info, err := ytdlFetchInfo(selected.URL)
-	if err != nil {
-		return ytdlSendError(ctx, err)
-	}
-	options := ytdlBuildFormatOptions(info)
-	if len(options) == 0 {
-		if reactErr := ctx.React("❌"); reactErr != nil {
-			return reactErr
-		}
-		return ytdlReply(ctx, "❌ No se encontraron formatos descargables para este video.")
-	}
-	ytdlStoreSession(sender, info, options)
-	if err := ytdlSendMenuFn(ctx, jid, ytdlMenuText(info, options), info.Thumbnail); err != nil {
-		return err
-	}
-	return ctx.React("✅")
+	return ytdlReply(ctx, fmt.Sprintf("❌ Número inválido. Elige entre 1 y %d con `%s <núm>` o `%s cancel`.", max, prefix, prefix))
 }
 
 func ytdlDownloadError(ctx *core.Context, err error) error {
@@ -366,109 +437,7 @@ func ytdlDownloadError(ctx *core.Context, err error) error {
 	return ytdlReply(ctx, "❌ Error descargando: "+ytdlTruncate(err.Error(), 250))
 }
 
-func ytdlReply(ctx *core.Context, text string) error {
-	return ctx.SendQuoted(core.TextMessage(text), ctx.Message)
-}
-
-func ytdlSendError(ctx *core.Context, err error) error {
-	if reactErr := ctx.React("❌"); reactErr != nil {
-		return reactErr
-	}
-	return ytdlReply(ctx, ytdlErrorText(err.Error(), ytdlFindDeno()))
-}
-
-// ytdlErrorText replica los mensajes específicos del catch original.
-func ytdlErrorText(errMsg, denoPath string) string {
-	switch {
-	case strings.Contains(errMsg, "Cookies file must be Netscape"):
-		return "❌ El archivo de cookies tiene formato incorrecto.\nAsegúrate de usar la extensión \"cookies_localy.txt\" que exporta en formato Netscape, o coloca el archivo JSON y el bot lo convertirá automáticamente."
-	case strings.Contains(errMsg, "HTTP Error 403") || strings.Contains(errMsg, "private") || strings.Contains(errMsg, "Private video"):
-		return "❌ El video es privado o requiere inicio de sesión.\nExporta tus cookies con la extensión \"cookies_localy.txt\" y colócalas en `assets/www.youtube.com_cookies.json`"
-	case strings.Contains(errMsg, "n challenge solving failed") || strings.Contains(errMsg, "Requested format is not available"):
-		denoHint := "❌ YouTube requiere Deno para resolver el n-challenge.\n   Instalá Deno en el servidor:\n   curl -fsSL https://deno.land/install.sh | sh\n   Después reiniciá PM2: pm2 restart index\n   O usá !restart en WhatsApp si el bot está vivo."
-		if denoPath != "" {
-			denoHint = "⚠️ El n-challenge de YouTube falló incluso con Deno."
-		}
-		return "❌ YouTube bloqueó la descarga.\n" + denoHint
-	case strings.Contains(errMsg, "No video results") || strings.Contains(errMsg, "Video unavailable"):
-		return "❌ Video no disponible. Puede haber sido eliminado o restringido en tu región."
-	case strings.Contains(errMsg, "UNICODE") || strings.Contains(errMsg, "Emoji"):
-		return "❌ Error con caracteres especiales en el título. Prueba con otro video."
-	case strings.Contains(errMsg, "Premature close") || strings.Contains(errMsg, "ECONNRESET") || strings.Contains(errMsg, "ETIMEDOUT"):
-		return "❌ Error de conexión con YouTube. Reintenta en unos segundos."
-	}
-	return "❌ Error: " + ytdlTruncate(errMsg, 300)
-}
-
-// ─── Estado de sesiones ─────────────────────────────────────────────────────
-
-func ytdlCancel(sender string) bool {
-	ytdlMu.Lock()
-	defer ytdlMu.Unlock()
-	_, a := ytdlSessions[sender]
-	_, b := ytdlSearches[sender]
-	delete(ytdlSessions, sender)
-	delete(ytdlSearches, sender)
-	return a || b
-}
-
-func ytdlStoreSession(sender string, info ytdlInfo, options []ytdlOption) {
-	ytdlMu.Lock()
-	defer ytdlMu.Unlock()
-	ytdlSessions[sender] = &ytdlSession{Info: info, Options: options, CreatedAt: ytdlNow()}
-}
-
-func ytdlTakeSession(sender string) (*ytdlSession, bool) {
-	ytdlMu.Lock()
-	defer ytdlMu.Unlock()
-	s, ok := ytdlSessions[sender]
-	if !ok {
-		return nil, false
-	}
-	delete(ytdlSessions, sender)
-	if ytdlNow().Sub(s.CreatedAt) > ytdlSessionTTL {
-		return nil, false
-	}
-	return s, true
-}
-
-func ytdlStoreSearch(sender string, results []ytdlSearchResult) {
-	ytdlMu.Lock()
-	defer ytdlMu.Unlock()
-	ytdlSearches[sender] = &ytdlSearchSession{Results: results, CreatedAt: ytdlNow()}
-}
-
-func ytdlTakeSearch(sender string) (*ytdlSearchSession, bool) {
-	ytdlMu.Lock()
-	defer ytdlMu.Unlock()
-	s, ok := ytdlSearches[sender]
-	if !ok {
-		return nil, false
-	}
-	delete(ytdlSearches, sender)
-	if ytdlNow().Sub(s.CreatedAt) > ytdlSessionTTL {
-		return nil, false
-	}
-	return s, true
-}
-
-func ytdlCleanupSessions() {
-	now := ytdlNow()
-	ytdlMu.Lock()
-	defer ytdlMu.Unlock()
-	for k, s := range ytdlSessions {
-		if now.Sub(s.CreatedAt) > ytdlSessionTTL {
-			delete(ytdlSessions, k)
-		}
-	}
-	for k, s := range ytdlSearches {
-		if now.Sub(s.CreatedAt) > ytdlSessionTTL {
-			delete(ytdlSearches, k)
-		}
-	}
-}
-
-// ─── Formato y menús ────────────────────────────────────────────────────────
+// ─── Helpers puros ──────────────────────────────────────────────────────────
 
 func ytdlFmtDuration(secs float64) string {
 	if secs <= 0 {
@@ -492,6 +461,62 @@ func ytdlFmtSize(bytes int64) string {
 		return fmt.Sprintf("%.0f KB", float64(bytes)/1024)
 	}
 	return fmt.Sprintf("%.0f MB", float64(bytes)/(1024*1024))
+}
+
+func ytdlTruncate(s string, n int) string {
+	if n < 0 {
+		n = 0
+	}
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func ytdlParseInt(s string) (int, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	i := 0
+	if s[0] == '+' || s[0] == '-' {
+		i++
+	}
+	start := i
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == start {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[:i])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// ytdlAutor prioriza los campos que yt-dlp rellena con más frecuencia.
+func ytdlAutor(d ytdlFormat) string {
+	for _, v := range []string{d.Channel, d.Uploader, d.ChannelTitle, d.UploaderID, d.ChannelID, d.PlaylistChannel, d.PlaylistUploader} {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	for _, creator := range d.Creators {
+		if s := strings.TrimSpace(creator); s != "" {
+			return s
+		}
+	}
+	return "YouTube"
+}
+
+func ytdlScore(f ytdlFormat) float64 {
+	score := f.TBR
+	if f.Acodec != "" && f.Acodec != "none" {
+		score += 1000
+	}
+	return score
 }
 
 // ytdlBuildFormatOptions replica buildFormatOptions().
@@ -533,9 +558,7 @@ func ytdlBuildFormatOptions(info ytdlInfo) []ytdlOption {
 		}
 		best := candidates[0]
 		for _, cur := range candidates[1:] {
-			bestScore := ytdlScore(best)
-			curScore := ytdlScore(cur)
-			if curScore > bestScore {
+			if ytdlScore(cur) > ytdlScore(best) {
 				best = cur
 			}
 		}
@@ -571,455 +594,118 @@ func ytdlBuildFormatOptions(info ytdlInfo) []ytdlOption {
 	return results
 }
 
-func ytdlScore(f ytdlFormat) float64 {
-	score := f.TBR
-	if f.Acodec != "" && f.Acodec != "none" {
-		score += 1000
-	}
-	return score
-}
-
-func ytdlMenuText(info ytdlInfo, options []ytdlOption) string {
-	var lines []string
-	lines = append(lines,
+func ytdlMenuText(info ytdlInfo, options []ytdlOption, prefix string) string {
+	lines := []string{
 		"╭━━━━━━━━━━━━━━━━━━━━",
-		"┃ 📹 *"+info.Title+"*",
-		"┃ ⏱  "+ytdlFmtDuration(info.Duration),
-		"┃ 📺 "+info.Channel,
+		"┃ 📹 *" + info.Title + "*",
+		"┃ ⏱  " + ytdlFmtDuration(info.Duration),
+		"┃ 📺 " + info.Channel,
 		"╰━━━━━━━━━━━━━━━━━━━━",
 		"",
 		"*Selecciona resolución:*",
 		"",
-	)
+	}
 	for i, opt := range options {
 		num := i + 1
 		size := ytdlFmtSize(opt.SizeBytes)
 		if opt.IsAudio {
 			lines = append(lines, fmt.Sprintf("%d 〉🎵 *%s*  — %s", num, opt.Label, size))
-		} else {
-			warn := ""
-			if opt.SizeBytes > ytdlWarnSize {
-				warn = " ⚠️"
-			}
-			lines = append(lines, fmt.Sprintf("%d 〉*%s*  — %s%s", num, opt.Label, size, warn))
+			continue
 		}
+		warn := ""
+		if opt.SizeBytes > ytdlWarnSize {
+			warn = " ⚠️"
+		}
+		lines = append(lines, fmt.Sprintf("%d 〉*%s*  — %s%s", num, opt.Label, size, warn))
 	}
 	lines = append(lines,
 		"",
-		"Responde con:  `.ytdl <núm>`  (ej: `.ytdl 3`)",
-		"Agrega `c` al final para comprimir en ZIP: `.ytdl 3 c`",
-		"`.ytdl cancel` para salir",
+		fmt.Sprintf("Responde con: `%s <núm>`  (ej: `%s 3`)", prefix, prefix),
+		fmt.Sprintf("Agrega `c` al final para comprimir en ZIP: `%s 3 c`", prefix),
+		fmt.Sprintf("`%s cancel` para salir", prefix),
 	)
 	return strings.Join(lines, "\n")
 }
 
-func ytdlSearchMenu(results []ytdlSearchResult) string {
-	var lines []string
-	lines = append(lines, "🔍 *Resultados de búsqueda:*", "")
+func ytdlSearchMenu(results []ytdlSearchResult, prefix string) string {
+	lines := []string{"🔍 *Resultados de búsqueda:*", ""}
 	for i, r := range results {
-		dur := ""
-		if r.Duration > 0 {
-			dur = "⏱ " + ytdlFmtDuration(r.Duration)
-		}
-		lines = append(lines, fmt.Sprintf("%d. *%s*", i+1, r.Title))
-		lines = append(lines, fmt.Sprintf("   📺 %s  %s", r.Channel, dur))
-	}
-	lines = append(lines,
-		"",
-		"Responde con:  `.ytdl <núm>`  (ej: `.ytdl 2`)",
-		"`.ytdl cancel` para salir",
-		"_(Búsqueda expira en 10 min)_",
-	)
-	return strings.Join(lines, "\n")
-}
-
-var ytdlHelpText = strings.Join([]string{
-	"📹 *YouTube / TikTok / X (Twitter) Downloader*",
-	"",
-	"Uso:",
-	"  `!ytdl <url>` — Lista resoluciones disponibles (YouTube, TikTok, X/Twitter, etc.)",
-	"  `!ytdl <núm>` — Descarga la opción seleccionada",
-	"  `!ytdl cancel` — Cancela la descarga actual",
-	"  `!ytdl c <url>` — Descarga + comprime en ZIP",
-	"  `!ytdl <núm> c` — Selección + comprime en ZIP",
-	"  `!ytdl <query>` — Buscar videos en YouTube",
-	"",
-	"Ejemplos:",
-	"  `!ytdl https://youtube.com/watch?v=xxx`",
-	"  `!ytdl https://www.tiktok.com/@user/video/xxx`",
-	"  `!ytdl https://x.com/user/status/xxx`",
-	"  `!ytdl 3`  (selecciona la opción 3)",
-	"  `!ytdl c https://youtu.be/xxx`  (comprimido)",
-	"  `!ytdl curso de python`  (búsqueda)",
-}, "\n")
-
-// ─── yt-dlp ─────────────────────────────────────────────────────────────────
-
-func ytdlCookiePathsDefault() []string {
-	return []string{
-		core.DataPath("assets", "www.youtube.com_cookies.json"),
-		core.DataPath("www.youtube.com_cookies.json"),
-		core.DataPath("assets", "www.youtube.com_cookies.txt"),
-		core.DataPath("www.youtube.com_cookies.txt"),
-	}
-}
-
-func ytdlFindDenoDefault() string {
-	if p, err := exec.LookPath("deno"); err == nil {
-		return p
-	}
-	home, _ := os.UserHomeDir()
-	if home == "" {
-		home = os.Getenv("HOME")
-	}
-	candidates := []string{
-		"/usr/local/bin/deno",
-	}
-	if home != "" {
-		candidates = append(candidates,
-			filepath.Join(home, ".deno/bin/deno"),
-			filepath.Join(home, ".local/bin/deno"),
-		)
-	}
-	if matches, _ := filepath.Glob("/home/*/.deno/bin/deno"); len(matches) > 0 {
-		candidates = append(candidates, matches...)
-	}
-	for _, c := range candidates {
-		if info, err := os.Stat(c); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return c
-		}
-	}
-	return ""
-}
-
-// ytdlBuildArgs arma los argumentos base que el original agrega siempre.
-func ytdlBuildArgs(args []string, cookiesFile, denoPath string) []string {
-	base := []string{"--remote-components", "ejs:github"}
-	if denoPath != "" {
-		base = append(base, "--js-runtimes", "deno:"+denoPath)
-	}
-	if cookiesFile != "" {
-		return append([]string{"--cookies", cookiesFile}, append(base, args...)...)
-	}
-	return append(base, args...)
-}
-
-type ytdlCookie struct {
-	Domain         string  `json:"domain"`
-	Name           string  `json:"name"`
-	Value          string  `json:"value"`
-	Path           string  `json:"path"`
-	Secure         bool    `json:"secure"`
-	ExpirationDate float64 `json:"expirationDate"`
-}
-
-// ytdlPrepareCookies convierte cookies JSON→Netscape si hace falta.
-func ytdlPrepareCookies() (path string, temp bool, err error) {
-	src := ""
-	for _, f := range ytdlCookiePaths() {
-		if _, statErr := os.Stat(f); statErr == nil {
-			src = f
+		if i >= 6 {
 			break
 		}
+		dur := ""
+		if r.Duration > 0 {
+			dur = " ⏱ " + ytdlFmtDuration(r.Duration)
+		}
+		channel := strings.TrimSpace(r.Channel)
+		if channel == "" {
+			channel = "YouTube"
+		}
+		lines = append(lines, fmt.Sprintf("%d. *%s*", i+1, r.Title))
+		lines = append(lines, fmt.Sprintf("   📺 %s%s", channel, dur))
 	}
-	if src == "" {
-		return "", false, nil
-	}
-	raw, err := os.ReadFile(src)
-	if err != nil {
-		return "", false, err
-	}
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" {
-		return "", false, nil
-	}
-
-	if strings.ToLower(filepath.Ext(src)) == ".txt" {
-		return src, false, nil
-	}
-	if strings.HasPrefix(trimmed, "#") {
-		return src, false, nil
-	}
-	if !strings.HasPrefix(trimmed, "[") {
-		return src, false, nil
-	}
-
-	var cookies []ytdlCookie
-	if err := json.Unmarshal([]byte(trimmed), &cookies); err != nil {
-		return "", false, nil
-	}
-	if len(cookies) == 0 {
-		return "", false, nil
-	}
-
-	lines := []string{
-		"# Netscape HTTP Cookie File",
-		"# Generado automáticamente desde JSON por ytdl.js",
+	lines = append(lines,
 		"",
-	}
-	fallbackExpiry := ytdlNow().Unix() + 10*365*86400
-	for _, c := range cookies {
-		if c.Domain == "" || c.Name == "" {
-			continue
-		}
-		domainFlag := "FALSE"
-		if strings.HasPrefix(c.Domain, ".") {
-			domainFlag = "TRUE"
-		}
-		cPath := c.Path
-		if cPath == "" {
-			cPath = "/"
-		}
-		secureFlag := "FALSE"
-		if c.Secure {
-			secureFlag = "TRUE"
-		}
-		expiry := fallbackExpiry
-		if c.ExpirationDate != 0 {
-			expiry = int64(c.ExpirationDate)
-		}
-		safeValue := strings.NewReplacer("\t", "", "\n", "", "\r", "").Replace(c.Value)
-		lines = append(lines, fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%s\t%s", c.Domain, domainFlag, cPath, secureFlag, expiry, c.Name, safeValue))
-	}
-	if len(lines) <= 3 {
-		return "", false, nil
-	}
-
-	dir := filepath.Join(ytdlTmpBase(), "cookies")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", false, err
-	}
-	out := filepath.Join(dir, fmt.Sprintf("cookies_%d.txt", ytdlNow().UnixNano()))
-	if err := os.WriteFile(out, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		return "", false, err
-	}
-	return out, true, nil
+		fmt.Sprintf("Responde `%s <núm>` (1..%d) · `%s cancel`", prefix, min(len(results), 6), prefix),
+	)
+	return strings.Join(lines, "\n")
 }
 
-func ytdlRunCommandDefault(ctx context.Context, name string, args ...string) (string, string, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.String(), stderr.String(), err
-}
-
-func ytdlYtdlp(args []string) (string, error) {
-	cookiesFile, isTemp, err := ytdlPrepareCookies()
-	if err != nil {
-		return "", err
+func ytdlHelpText(prefix string) string {
+	if strings.TrimSpace(prefix) == "" {
+		prefix = ".yt"
 	}
-	if isTemp && cookiesFile != "" {
-		defer os.Remove(cookiesFile)
-	}
-	allArgs := ytdlBuildArgs(args, cookiesFile, ytdlFindDeno())
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	stdout, stderr, err := ytdlRunCommand(ctx, "yt-dlp", allArgs...)
-	if err != nil {
-		msg := ""
-		for _, line := range strings.Split(stderr, "\n") {
-			if strings.Contains(line, "ERROR:") {
-				msg = line
-				break
-			}
-		}
-		if msg == "" {
-			msg = err.Error()
-		}
-		return "", fmt.Errorf("%s", ytdlTruncate(msg, 400))
-	}
-	return stdout, nil
-}
-
-// ytdlAutor prioriza los campos que yt-dlp rellena con más frecuencia.
-func ytdlAutor(d ytdlFormat) string {
-	for _, v := range []string{d.Channel, d.Uploader, d.ChannelTitle, d.UploaderID, d.ChannelID} {
-		if s := strings.TrimSpace(v); s != "" {
-			return s
-		}
-	}
-	return "Desconocido"
-}
-
-func ytdlFetchVideoInfo(rawURL string) (ytdlInfo, error) {
-	stdout, err := ytdlYtdlp([]string{"--dump-json", "--no-warnings", "--no-playlist", rawURL})
-	if err != nil {
-		return ytdlInfo{}, err
-	}
-	var data ytdlFormat
-	if err := json.Unmarshal([]byte(stdout), &data); err != nil {
-		return ytdlInfo{}, err
-	}
-	title := data.Title
-	if title == "" {
-		title = "Sin título"
-	}
-	channel := ytdlAutor(data)
-	webpage := data.WebpageURL
-	if webpage == "" {
-		webpage = rawURL
-	}
-	return ytdlInfo{
-		ID:         data.ID,
-		Title:      title,
-		Duration:   data.Duration,
-		Channel:    channel,
-		Thumbnail:  data.Thumbnail,
-		WebpageURL: webpage,
-		Formats:    data.Formats,
-	}, nil
-}
-
-func ytdlSearchYoutube(query string) ([]ytdlSearchResult, error) {
-	stdout, err := ytdlYtdlp([]string{"ytsearch5:" + query, "--dump-json", "--no-warnings", "--flat-playlist", "--no-playlist"})
-	if err != nil {
-		return nil, err
-	}
-	lines := strings.Split(strings.TrimSpace(stdout), "\n")
-	out := make([]ytdlSearchResult, 0, len(lines))
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var d ytdlFormat
-		if err := json.Unmarshal([]byte(line), &d); err != nil {
-			continue
-		}
-		title := d.Title
-		if title == "" {
-			title = "Sin título"
-		}
-		channel := ytdlAutor(d)
-		u := d.URL
-		if u == "" {
-			u = d.WebpageURL
-		}
-		if u == "" {
-			u = "https://youtu.be/" + d.ID
-		}
-		out = append(out, ytdlSearchResult{
-			ID:        d.ID,
-			Title:     title,
-			URL:       u,
-			Duration:  d.Duration,
-			Channel:   channel,
-			Thumbnail: d.Thumbnail,
-		})
-	}
-	return out, nil
-}
-
-func ytdlDownloadMedia(rawURL, formatSpec, outputDir string) (string, error) {
-	outputTemplate := filepath.Join(outputDir, "%(title)s.%(ext)s")
-	if _, err := ytdlYtdlp([]string{
-		"-f", formatSpec,
-		"--merge-output-format", "mp4",
-		"--no-warnings",
-		"--no-playlist",
-		"--no-part",
-		"--no-mtime",
-		"-o", outputTemplate,
-		rawURL,
-	}); err != nil {
-		return "", err
-	}
-	entries, err := os.ReadDir(outputDir)
-	if err != nil {
-		return "", err
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if name == "." || name == ".." || strings.HasPrefix(name, ".") || entry.IsDir() {
-			continue
-		}
-		return filepath.Join(outputDir, name), nil
-	}
-	return "", fmt.Errorf("No se encontró el archivo descargado.")
-}
-
-func ytdlSendMenuWithThumbnail(ctx *core.Context, jid, menuText, thumbnailURL string) error {
-	if thumbnailURL != "" {
-		resp, err := ytdlHTTPClient.Get(thumbnailURL)
-		if err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				data, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-				if readErr == nil && len(data) > 0 {
-					if err := ctx.SendImage(data, menuText); err == nil {
-						return nil
-					}
-				}
-			}
-		}
-	}
-	return ytdlReply(ctx, menuText)
-}
-
-func ytdlParseInt(s string) (int, bool) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, false
-	}
-	i := 0
-	if s[0] == '+' || s[0] == '-' {
-		i++
-	}
-	start := i
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-		i++
-	}
-	if i == start {
-		return 0, false
-	}
-	n, err := strconv.Atoi(s[:i])
-	if err != nil {
-		return 0, false
-	}
-	return n, true
-}
-
-func ytdlTruncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
+	return strings.Join([]string{
+		"📹 *YouTube / TikTok / X (Twitter) Downloader*",
+		"",
+		"Uso:",
+		fmt.Sprintf("  `%s <url>` — Lista resoluciones disponibles", prefix),
+		fmt.Sprintf("  `%s <núm>` — Descarga la opción seleccionada", prefix),
+		fmt.Sprintf("  `%s cancel` — Cancela la descarga actual", prefix),
+		fmt.Sprintf("  `%s c <url>` — Descarga + comprime en ZIP", prefix),
+		fmt.Sprintf("  `%s <núm> c` — Selección + comprime en ZIP", prefix),
+		fmt.Sprintf("  `%s <query>` — Buscar videos en YouTube", prefix),
+		"",
+		"Ejemplos:",
+		fmt.Sprintf("  `%s https://youtube.com/watch?v=xxx`", prefix),
+		fmt.Sprintf("  `%s 3`  (selecciona la opción 3)", prefix),
+		fmt.Sprintf("  `%s curso de python`  (búsqueda)", prefix),
+	}, "\n")
 }
 
 // ─── Segundo plano: limpieza y auto-actualización ───────────────────────────
 
-func ytdlInit(client *whatsmeow.Client, st *store.Store) error {
+func ytdlInit(_ *whatsmeow.Client, _ *store.Store) error {
+	svc := defaultYtdlService()
 	go func() {
-		ytdlSweepTmp()
+		ytdlSweepTmp(svc.Client)
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			ytdlSweepTmp()
+			ytdlSweepTmp(svc.Client)
 		}
 	}()
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
-			ytdlCleanupSessions()
+			svc.Sessions.Cleanup()
 		}
 	}()
 	go func() {
 		time.Sleep(time.Minute)
-		ytdlAutoUpdate()
+		ytdlAutoUpdate(svc.Client)
 		ticker := time.NewTicker(ytdlUpdateInterval)
 		defer ticker.Stop()
 		for range ticker.C {
-			ytdlAutoUpdate()
+			ytdlAutoUpdate(svc.Client)
 		}
 	}()
 	return nil
 }
 
-func ytdlSweepTmp() {
-	base := ytdlTmpBase()
+func ytdlSweepTmp(client *ytdlClient) {
+	base := client.TmpBase()
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		return
 	}
@@ -1027,7 +713,7 @@ func ytdlSweepTmp() {
 	if err != nil {
 		return
 	}
-	now := ytdlNow()
+	now := client.Clock()
 	var freed int64
 	for _, entry := range entries {
 		full := filepath.Join(base, entry.Name())
@@ -1037,7 +723,7 @@ func ytdlSweepTmp() {
 		}
 		if now.Sub(info.ModTime()) > ytdlTmpMaxAge {
 			freed += ytdlSizeOf(full)
-			_ = os.RemoveAll(full)
+			_ = client.RemoveAll(full)
 		}
 	}
 	if freed > 0 {
@@ -1056,10 +742,10 @@ func ytdlSizeOf(path string) int64 {
 	return total
 }
 
-func ytdlAutoUpdate() {
+func ytdlAutoUpdate(client *ytdlClient) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	stdout, _, err := ytdlRunCommand(ctx, "yt-dlp", "-U")
+	stdout, _, err := client.Run(ctx, "yt-dlp", "-U")
 	if err != nil {
 		slog.Warn("⚠️ ytdl: auto-actualización falló (no crítico)", "error", err)
 		return
@@ -1068,7 +754,7 @@ func ytdlAutoUpdate() {
 	if strings.Contains(strings.ToLower(out), "pip or using the wheel") {
 		ctx2, cancel2 := context.WithTimeout(context.Background(), 180*time.Second)
 		defer cancel2()
-		if _, _, err := ytdlRunCommand(ctx2, "python3", "-m", "pip", "install", "--user", "--break-system-packages", "-U", "yt-dlp"); err != nil {
+		if _, _, err := client.Run(ctx2, "python3", "-m", "pip", "install", "--user", "--break-system-packages", "-U", "yt-dlp"); err != nil {
 			slog.Warn("⚠️ ytdl: actualización vía pip falló", "error", err)
 			return
 		}
