@@ -12,6 +12,42 @@ import (
 	"whatsbot-go/internal/core"
 )
 
+func helpTestEntries() []helpEntry {
+	return []helpEntry{
+		{
+			Command: "sa", Aliases: []string{"sticker", "s"}, Title: "Stickers con sonido",
+			Category: "stickers", Description: "Crea stickers que reproducen audio al tocarlos.",
+			HowTo:    []string{"Responde a un video corto con {p}sa", "O envía una foto con {p}sa y luego el audio"},
+			Options:  []string{"crop — recorta en cuadrado", "circular — forma redonda"},
+			Examples: []string{"{p}sa (respondiendo a un video)", "{p}sa crop 0:02 0:05"},
+		},
+		{
+			Command: "yt", Title: "Videos de YouTube", Category: "downloads",
+			Description: "Descarga un video para compartirlo.", Examples: []string{"{p}yt <enlace>"},
+		},
+		{
+			Command: "dado", Title: "Tirar dados", Category: "games",
+			Description: "Tira dados y muestra el resultado.",
+		},
+		{
+			Command: "debug-st", Title: "Diagnóstico interno", Category: "admin",
+			Description: "Revisión interna del bot.", AdminOnly: true,
+		},
+		{
+			Command: "secreto", Title: "Oculto", Category: "utils",
+			Description: "No visible.", Hidden: true,
+		},
+	}
+}
+
+func helpTestData() *helpCacheData {
+	entries := helpTestEntries()
+	return &helpCacheData{
+		Version: helpCacheVersion, GeneratedAt: 1, AddonsHash: "abc",
+		Entries: entries, AliasMap: helpBuildAliasMap(entries),
+	}
+}
+
 func TestHelpCommands(t *testing.T) {
 	got := Help{}.Commands()
 	if len(got) != 2 || got[0] != "help" || got[1] != "ayuda" {
@@ -32,7 +68,6 @@ func TestHelpComputeHashCambiaConElContenido(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helpComputeHash: %v", err)
 	}
-
 	if err := os.WriteFile(filepath.Join(dir, "uno.go"), []byte("package addons // más contenido"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -43,8 +78,6 @@ func TestHelpComputeHashCambiaConElContenido(t *testing.T) {
 	if h1 == h2 {
 		t.Fatal("el hash debe cambiar cuando cambia el código")
 	}
-
-	// Los tests y el propio help.go se ignoran.
 	if err := os.WriteFile(filepath.Join(dir, "help.go"), []byte("package addons // distinto"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -59,21 +92,33 @@ func TestHelpComputeHashCambiaConElContenido(t *testing.T) {
 
 func TestHelpLoadCache(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "help_cache.json")
-	if err := os.WriteFile(path, []byte(`{"generatedAt":1,"addonsHash":"abc","groups":[{"commands":[".dado"],"preview":"dado","technical":"t"}],"aliasMap":{}}`), 0o644); err != nil {
+	data := helpTestData()
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	prev := helpCacheAlt
 	helpCacheAlt = path
 	t.Cleanup(func() { helpCacheAlt = prev })
 
-	data := helpLoadCache()
-	if data == nil || len(data.Groups) != 1 || data.Groups[0].Commands[0] != ".dado" {
-		t.Fatalf("caché inesperado: %#v", data)
+	loaded := helpLoadCache()
+	if loaded == nil || loaded.Version != helpCacheVersion || len(loaded.Entries) != 5 {
+		t.Fatalf("caché inesperado: %#v", loaded)
 	}
-	if data.AliasMap == nil {
-		t.Fatal("aliasMap debía inicializarse")
+	if loaded.AliasMap["sa"] != 0 || loaded.AliasMap[".sticker"] != 0 {
+		t.Fatalf("aliasMap inesperado: %#v", loaded.AliasMap)
 	}
 
+	old := `{"generatedAt":1,"addonsHash":"abc","groups":[{"commands":[".dado"],"preview":"dado","technical":"t"}],"aliasMap":{}}`
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := helpLoadCache(); got != nil {
+		t.Fatalf("una caché anterior a la versión 2 debe regenerarse: %#v", got)
+	}
 	if err := os.WriteFile(path, []byte("{roto"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -82,10 +127,32 @@ func TestHelpLoadCache(t *testing.T) {
 	}
 }
 
+func TestHelpParseLLMJSONLimpieza(t *testing.T) {
+	contenido := "Aquí tienes:\n```json\n[{\"command\":\".SA\",\"aliases\":[\".s\"],\"title\":\"Prueba\",\"category\":\"inventada\",\"description\":\"Hace algo.\",\"how_to\":[\"Usa {p}sa\"],\"options\":[],\"examples\":[\"{p}sa\"]}]\n```\nFin."
+	entries, err := helpParseLLMEntries(contenido)
+	if err != nil {
+		t.Fatalf("helpParseLLMEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entradas inesperadas: %#v", entries)
+	}
+	entry := helpNormalizeEntry(entries[0])
+	if entry.Command != "sa" || entry.Category != "utils" {
+		t.Fatalf("entrada normalizada inesperada: %+v", entry)
+	}
+	if entry.Aliases[0] != "s" {
+		t.Fatalf("alias inesperado: %#v", entry.Aliases)
+	}
+
+	if _, err := helpParseLLMEntries("no es json"); err == nil {
+		t.Fatal("esperaba error con texto sin JSON")
+	}
+}
+
 func TestHelpAnalyzeFile(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		content := `[{"commands":[".demo",".d"],"preview":"Demo","technical":"Hace algo"}]`
+		content := "```json\n[{\"command\":\"demo\",\"aliases\":[\"d\"],\"title\":\"Demo\",\"category\":\"utils\",\"description\":\"Hace algo simple.\",\"how_to\":[\"Escribe {p}demo\"],\"options\":[],\"examples\":[\"{p}demo\"]}]\n```"
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{"message": map[string]string{"content": content}}},
 		})
@@ -97,15 +164,15 @@ func TestHelpAnalyzeFile(t *testing.T) {
 	helpHTTP = srv.Client()
 	t.Cleanup(func() { helpAPIURL, helpHTTP = prevURL, prevHTTP })
 
-	groups, err := helpAnalyzeFile("module.exports = { commands: ['demo', 'd'] }")
+	entries, err := helpAnalyzeFile("package addons // commands: demo, d")
 	if err != nil {
 		t.Fatalf("helpAnalyzeFile: %v", err)
 	}
-	if len(groups) != 1 || groups[0].Preview != "Demo" {
-		t.Fatalf("grupos inesperados: %#v", groups)
+	if len(entries) != 1 || entries[0].Command != "demo" || entries[0].Title != "Demo" {
+		t.Fatalf("entradas inesperadas: %#v", entries)
 	}
-	if len(groups[0].Commands) != 2 || groups[0].Commands[0] != ".demo" {
-		t.Fatalf("comandos inesperados: %#v", groups[0].Commands)
+	if len(entries[0].Aliases) != 1 || entries[0].Aliases[0] != "d" {
+		t.Fatalf("alias inesperados: %#v", entries[0].Aliases)
 	}
 }
 
@@ -122,6 +189,147 @@ func TestHelpAnalyzeFileErrorHTTP(t *testing.T) {
 
 	if _, err := helpAnalyzeFile("code"); err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("esperaba error 500, obtuve %v", err)
+	}
+}
+
+func TestHelpLimpiaComandosBorradosAlActualizar(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "prueba")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sa.go"), []byte("package addons"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(t.TempDir(), "help_cache.json")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		content := `[{"command":"sa","title":"Stickers con sonido","category":"stickers","description":"Crea stickers con audio."},{"command":"borrado","title":"Ya no existe","category":"utils","description":"Este comando se eliminó."}]`
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"content": content}}},
+		})
+	}))
+	defer srv.Close()
+
+	prevSrc, prevCache, prevHTTP, prevURL, prevLive, prevData := helpSrcAlt, helpCacheAlt, helpHTTP, helpAPIURL, helpLiveCommand, helpData
+	helpSrcAlt, helpCacheAlt, helpAPIURL, helpHTTP = dir, cachePath, srv.URL, srv.Client()
+	helpLiveCommand = func() []string { return []string{"sa", "other"} }
+	helpData = nil
+	t.Cleanup(func() {
+		helpSrcAlt, helpCacheAlt, helpHTTP, helpAPIURL, helpLiveCommand, helpData = prevSrc, prevCache, prevHTTP, prevURL, prevLive, prevData
+	})
+
+	data, err := helpGenerateCache(true)
+	if err != nil {
+		t.Fatalf("helpGenerateCache: %v", err)
+	}
+	if len(data.Entries) != 1 || data.Entries[0].Command != "sa" {
+		t.Fatalf("comandos borrados quedaron en la caché: %#v", data.Entries)
+	}
+	if _, ok := data.AliasMap["borrado"]; ok {
+		t.Fatal("el comando borrado no debe quedar en aliasMap")
+	}
+	if data.Version != helpCacheVersion {
+		t.Fatalf("versión=%d, esperaba %d", data.Version, helpCacheVersion)
+	}
+}
+
+func TestHelpApplyPrefix(t *testing.T) {
+	for _, prefix := range []string{"!", ".", "/"} {
+		got := helpApplyPrefix("{p}sa y {p}help", prefix)
+		want := prefix + "sa y " + prefix + "help"
+		if got != want {
+			t.Fatalf("prefijo %q: %q, esperaba %q", prefix, got, want)
+		}
+	}
+	if got := helpApplyPrefix("{p}sa", ""); got != ".sa" {
+		t.Fatalf("prefijo vacío: %q", got)
+	}
+}
+
+func TestHelpRenderMenuOcultaAdmin(t *testing.T) {
+	menu := helpRenderMenu(helpTestData(), "!")
+	for _, want := range []string{
+		"📖 Comandos del bot", "🎨 Stickers y Multimedia", "!sa", "!yt", "!dado",
+		"💡 Escribe !help <comando>", "📂 También puedes ver una categoría: !help stickers",
+	} {
+		if !strings.Contains(menu, want) {
+			t.Fatalf("falta %q en el menú:\n%s", want, menu)
+		}
+	}
+	for _, hidden := range []string{"!debug-st", "!secreto", "⚙️ Administración"} {
+		if strings.Contains(menu, hidden) {
+			t.Fatalf("el menú no debe contener %q:\n%s", hidden, menu)
+		}
+	}
+}
+
+func TestHelpRenderCategory(t *testing.T) {
+	data := helpTestData()
+	cat, ok := helpResolveCategory("juegos")
+	if !ok || cat.Key != "games" {
+		t.Fatalf("categoría juegos=%+v ok=%v", cat, ok)
+	}
+	got := helpRenderCategory(data, "!", cat)
+	if !strings.Contains(got, "🎮 Juegos y Diversión") || !strings.Contains(got, "!dado — Tirar dados") {
+		t.Fatalf("categoría inesperada:\n%s", got)
+	}
+
+	cat, ok = helpResolveCategory("descargas")
+	if !ok || cat.Key != "downloads" {
+		t.Fatalf("categoría descargas=%+v ok=%v", cat, ok)
+	}
+	if got := helpRenderCategory(data, ".", cat); !strings.Contains(got, ".yt — Videos de YouTube") {
+		t.Fatalf("categoría descargas inesperada:\n%s", got)
+	}
+
+	cat, ok = helpResolveCategory("admin")
+	if !ok || !cat.Admin {
+		t.Fatalf("categoría admin=%+v ok=%v", cat, ok)
+	}
+	got = helpRenderCategory(data, "!", cat)
+	if !strings.Contains(got, "!debug-st — Diagnóstico interno") || strings.Contains(got, "!sa") {
+		t.Fatalf("categoría admin inesperada:\n%s", got)
+	}
+}
+
+func TestHelpBusquedaPorComandoAliasYCategoria(t *testing.T) {
+	data := helpTestData()
+	for _, query := range []string{"sa", "sticker", "s"} {
+		idx, ok := data.AliasMap[helpNormalize(query)]
+		if !ok || data.Entries[idx].Command != "sa" {
+			t.Fatalf("búsqueda %q: idx=%d ok=%v", query, idx, ok)
+		}
+	}
+	for _, query := range []string{"stickers", "STICKERS Y MULTIMEDIA", "juegos", "descargas", "admin"} {
+		if _, ok := helpResolveCategory(query); !ok {
+			t.Fatalf("no se resolvió la categoría %q", query)
+		}
+	}
+	if _, ok := helpResolveCategory("noexiste"); ok {
+		t.Fatal("una categoría inexistente no debe resolverse")
+	}
+}
+
+func TestHelpRenderEntryPlantilla(t *testing.T) {
+	got := helpRenderEntry(helpTestEntries()[0], "!")
+	for _, want := range []string{
+		"🎨 !sa (también: !sticker, !s) — Stickers con sonido",
+		"Crea stickers que reproducen audio al tocarlos.",
+		"Cómo usarlo:", "• Responde a un video corto con !sa",
+		"Opciones útiles:", "• crop — recorta en cuadrado",
+		"Ejemplos:", "• !sa crop 0:02 0:05",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("falta %q en la ficha:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "{p}") {
+		t.Fatalf("quedó un marcador sin reemplazar:\n%s", got)
+	}
+}
+
+func TestHelpRenderUnknown(t *testing.T) {
+	got := helpRenderUnknown("nope", "/")
+	if !strings.Contains(got, "❓ No encontré ayuda para \"nope\".") || !strings.Contains(got, "/help") {
+		t.Fatalf("respuesta inesperada:\n%s", got)
 	}
 }
 

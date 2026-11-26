@@ -14,29 +14,31 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"go.mau.fi/whatsmeow"
-
-	"golang.org/x/text/collate"
-	"golang.org/x/text/language"
+	"golang.org/x/text/unicode/norm"
 
 	"whatsbot-go/internal/core"
 	"whatsbot-go/internal/store"
 )
 
-// Help porta addons/help.js: menú generado por DeepSeek y cacheado en
-// help_cache.json, con regeneración automática cuando cambian los addons.
+// Help porte de help.js: fichas simples generadas con DeepSeek, guardadas en
+// help_cache.json y regeneradas automáticamente cuando cambian los addons.
 type Help struct{}
 
 // Commands cumple core.Addon.
 func (Help) Commands() []string { return []string{"help", "ayuda"} }
 
+const helpCacheVersion = 2
+
 // Inyectables para pruebas (sin red ni depender del árbol real de addons).
 var (
-	helpHTTP     = &http.Client{Timeout: 60 * time.Second}
-	helpAPIURL   = "https://api.deepseek.com/v1/chat/completions"
-	helpCacheAlt string
-	helpSrcAlt   string
+	helpHTTP        = &http.Client{Timeout: 60 * time.Second}
+	helpAPIURL      = "https://api.deepseek.com/v1/chat/completions"
+	helpCacheAlt    string
+	helpSrcAlt      string
+	helpLiveCommand = func() []string { return core.DefaultRouter().Commands() }
 )
 
 func helpCachePath() string {
@@ -46,7 +48,7 @@ func helpCachePath() string {
 	return core.DataPath("help_cache.json")
 }
 
-// helpSourceFS embebe el código de los addons para que `!help update` siga
+// helpSourceFS embebe el código de los addons para que `help update` siga
 // funcionando aunque el binario se ejecute sin el árbol de fuentes al lado.
 // `*.go` también incluye help.go y *_test.go; helpSources los filtra.
 //
@@ -102,17 +104,128 @@ func helpSources() ([]helpSource, error) {
 	return out, nil
 }
 
-type helpGroup struct {
-	Commands  []string `json:"commands"`
-	Preview   string   `json:"preview"`
-	Technical string   `json:"technical"`
+// ─── Categorías fijas ──────────────────────────────────────────────────────
+
+type helpCategory struct {
+	Key   string
+	Name  string
+	Match []string
+	Admin bool
+}
+
+var helpCategories = []helpCategory{
+	{Key: "stickers", Name: "🎨 Stickers y Multimedia", Match: []string{"stickers", "sticker", "multimedia", "imagenes", "gif"}},
+	{Key: "downloads", Name: "📥 Descargas", Match: []string{"descargas", "descarga", "downloads", "descargar"}},
+	{Key: "ai", Name: "🤖 IA y Texto", Match: []string{"ia", "texto", "ai", "chat", "traduccion"}},
+	{Key: "games", Name: "🎮 Juegos y Diversión", Match: []string{"juegos", "juego", "games", "diversion"}},
+	{Key: "utils", Name: "🛠️ Utilidades", Match: []string{"utilidades", "utils", "utiles", "herramientas"}},
+	{Key: "groups", Name: "🛡️ Grupos y Moderación", Match: []string{"grupos", "moderacion", "grupo"}},
+	{Key: "admin", Name: "⚙️ Administración", Match: []string{"admin", "administracion"}, Admin: true},
+}
+
+func helpNormalize(s string) string {
+	s = strings.ToLower(norm.NFD.String(s))
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.Is(unicode.Mn, r) {
+			continue
+		}
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func helpCategoryByKey(key string) (helpCategory, bool) {
+	q := helpNormalize(key)
+	for _, c := range helpCategories {
+		if helpNormalize(c.Key) == q || helpNormalize(c.Name) == q {
+			return c, true
+		}
+		for _, m := range c.Match {
+			if helpNormalize(m) == q {
+				return c, true
+			}
+		}
+	}
+	return helpCategory{}, false
+}
+
+func helpResolveCategory(query string) (helpCategory, bool) {
+	q := helpNormalize(query)
+	if q == "" {
+		return helpCategory{}, false
+	}
+	for _, c := range helpCategories {
+		if helpNormalize(c.Key) == q || helpNormalize(c.Name) == q {
+			return c, true
+		}
+		for _, m := range c.Match {
+			if helpNormalize(m) == q {
+				return c, true
+			}
+		}
+	}
+	for _, c := range helpCategories {
+		full := helpNormalize(c.Name)
+		if strings.Contains(full, q) || strings.Contains(q, full) {
+			return c, true
+		}
+	}
+	return helpCategory{}, false
+}
+
+func helpCanonicalCategory(raw string) string {
+	if c, ok := helpCategoryByKey(raw); ok {
+		return c.Key
+	}
+	return "utils"
+}
+
+func helpCategoryEmoji(key string) string {
+	if c, ok := helpCategoryByKey(key); ok {
+		if i := strings.IndexByte(c.Name, ' '); i > 0 {
+			return c.Name[:i]
+		}
+		return c.Name
+	}
+	return "🤖"
+}
+
+var helpInternalCommands = map[string]bool{
+	"debug": true, "debug-st": true, "debugpp": true, "debug-pp": true,
+	"debug-info": true, "sdebug": true, "sysinfo": true, "sistema": true,
+	"server": true, "fetch": true, "speed": true, "prefix": true,
+	"setprefix": true, "getpp": true, "restart": true, "looger": true,
+	"cor": true, "info": true, "files": true, "repo": true, "git": true,
+}
+
+func helpIsInternal(command string) bool {
+	return helpInternalCommands[helpNormalize(command)]
+}
+
+// ─── Caché tipada ──────────────────────────────────────────────────────────
+
+type helpEntry struct {
+	Command     string   `json:"command"`
+	Aliases     []string `json:"aliases"`
+	Title       string   `json:"title"`
+	Category    string   `json:"category"`
+	Description string   `json:"description"`
+	HowTo       []string `json:"how_to"`
+	Options     []string `json:"options"`
+	Examples    []string `json:"examples"`
+	AdminOnly   bool     `json:"admin_only"`
+	Hidden      bool     `json:"hidden"`
 }
 
 type helpCacheData struct {
-	GeneratedAt int64                `json:"generatedAt"`
-	AddonsHash  string               `json:"addonsHash"`
-	Groups      []helpGroup          `json:"groups"`
-	AliasMap    map[string]helpGroup `json:"aliasMap"`
+	Version     int            `json:"version"`
+	GeneratedAt int64          `json:"generatedAt"`
+	AddonsHash  string         `json:"addonsHash"`
+	Entries     []helpEntry    `json:"entries"`
+	AliasMap    map[string]int `json:"aliasMap"`
 }
 
 var (
@@ -121,16 +234,34 @@ var (
 	helpRegenCh chan struct{}
 )
 
-const helpSystemPrompt = `Eres un asistente que analiza addons para un bot de WhatsApp. Agrupa los comandos que realizan la misma función (alias). Devuelve ÚNICAMENTE un array JSON de objetos con la estructura:
+const helpSystemPrompt = `Eres el redactor de la ayuda de un bot de WhatsApp. Tu público es una persona cualquiera que NO sabe programar, NO sabe cómo funciona un bot y NO conoce comandos de Linux.
+
+Devuelve ÚNICAMENTE un array JSON válido, sin texto ni bloques markdown, con un objeto por comando o grupo de comandos que hagan lo mismo:
 [
   {
-    "commands": [".c", ".chat"],
-    "preview": "Descripción corta (1 línea, emoji permitido).",
-    "technical": "Explicación técnica detallada (uso, opciones, comportamiento)."
-  },
-  ...
+    "command": "sa",
+    "aliases": ["ss", "audio"],
+    "title": "Stickers con sonido",
+    "category": "stickers",
+    "description": "Una o dos frases muy simples sobre lo que hace, para una persona normal.",
+    "how_to": ["Paso corto uno usando {p} si hace falta.", "Paso corto dos."],
+    "options": ["crop — recorta en cuadrado", "circular — forma redonda"],
+    "examples": ["{p}sa respondiendo a un video", "{p}sa crop 0:02 0:05"],
+    "admin_only": false,
+    "hidden": false
+  }
 ]
-Si un addon no tiene comandos, responde []. No incluyas bloques de markdown.`
+
+REGLAS ESTRICTAS:
+- Usa siempre {p} donde vaya el prefijo del comando (ej: {p}st, {p}yt). Nunca escribas un punto, una exclamación ni una barra fijo delante del comando.
+- "command" es el nombre real del comando sin prefijo. "aliases" son los otros nombres que lo invocan.
+- "title" máximo 30 caracteres. "description" máximo 2 frases. "how_to" de 1 a 3 pasos. "options" máximo 6. "examples" de 1 a 3.
+- "category" debe ser exactamente una de estas claves: stickers, downloads, ai, games, utils, groups, admin.
+- Marca "admin_only": true en comandos internos de diagnóstico, del servidor o del dueño (debug-st, debug-info, debug-pp, sdebug, sysinfo, sistema, server, fetch, speed, prefix, setprefix, restart, getpp, cor, info, files, repo, git). Marca "hidden": true en los que el usuario normal nunca debe ver.
+- Si un límite importa al usuario, exprésalo en lenguaje humano: "videos de hasta 5 segundos", nunca en kilobytes ni nombres de variables.
+
+PROHIBIDO en cualquier texto que devuelvas: ffmpeg, ffprobe, webpmux, yt-dlp, Protobuf, oneof, dual-blob, WebP, EXIF, API, JSON, SQLite, PM2, Linux, variables de entorno, SA_*, *_API_KEY, addon, handler, búsqueda binaria, sesión temporal, errores internos, reacciones técnicas ni palabras en inglés. Tampoco menciones archivos, carpetas ni comandos de terminal.
+Si un addon no tiene comandos, responde [].`
 
 func init() {
 	core.Register(Help{})
@@ -139,18 +270,6 @@ func init() {
 
 // helpBackground replica el init(sock, store) del addon original.
 func helpBackground(_ *whatsmeow.Client, _ *store.Store) error {
-	if _, err := os.Stat(helpCachePath()); err != nil {
-		slog.Info("📝 Generando caché de ayuda con DeepSeek...")
-		go func() {
-			if _, err := helpGenerateCache(false); err != nil {
-				slog.Error("❌ Error generando ayuda:", "error", err)
-				return
-			}
-			slog.Info("✅ Caché de ayuda creada.")
-		}()
-		return nil
-	}
-
 	helpMu.Lock()
 	if helpData == nil {
 		helpData = helpLoadCache()
@@ -177,6 +296,21 @@ func helpComputeHash() (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
+func helpBuildAliasMap(entries []helpEntry) map[string]int {
+	out := make(map[string]int)
+	for i, e := range entries {
+		for _, k := range append([]string{e.Command}, e.Aliases...) {
+			k = helpNormalize(k)
+			if k == "" {
+				continue
+			}
+			out[k] = i
+			out["."+k] = i
+		}
+	}
+	return out
+}
+
 func helpLoadCache() *helpCacheData {
 	raw, err := os.ReadFile(helpCachePath())
 	if err != nil {
@@ -190,10 +324,80 @@ func helpLoadCache() *helpCacheData {
 		slog.Error("❌ [help] Caché inválido:", "error", err)
 		return nil
 	}
+	if data.Version != helpCacheVersion {
+		return nil
+	}
 	if data.AliasMap == nil {
-		data.AliasMap = make(map[string]helpGroup)
+		data.AliasMap = helpBuildAliasMap(data.Entries)
 	}
 	return &data
+}
+
+func helpCleanCommand(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	return strings.TrimLeft(s, ".!/")
+}
+
+func helpLimit(list []string, max int) []string {
+	if len(list) > max {
+		list = append([]string(nil), list[:max]...)
+	}
+	out := make([]string, 0, len(list))
+	for _, s := range list {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func helpNormalizeEntry(e helpEntry) helpEntry {
+	e.Command = helpCleanCommand(e.Command)
+	for i, a := range e.Aliases {
+		e.Aliases[i] = helpCleanCommand(a)
+	}
+	e.Title = strings.TrimSpace(e.Title)
+	e.Description = strings.TrimSpace(e.Description)
+	e.Category = helpCanonicalCategory(e.Category)
+	e.HowTo = helpLimit(e.HowTo, 3)
+	e.Options = helpLimit(e.Options, 6)
+	e.Examples = helpLimit(e.Examples, 3)
+	if e.Title == "" {
+		e.Title = e.Command
+	}
+	if e.Description == "" {
+		e.Description = helpApplyPrefix("Muestra lo que puedes hacer con {p}"+e.Command+".", ".")
+	}
+	if helpIsInternal(e.Command) || e.Category == "admin" {
+		e.AdminOnly = true
+	}
+	return e
+}
+
+func helpCommandExists(command string, live []string) bool {
+	c := helpNormalize(command)
+	for _, l := range live {
+		if helpNormalize(l) == c {
+			return true
+		}
+	}
+	return false
+}
+
+func helpParseLLMEntries(content string) ([]helpEntry, error) {
+	content = strings.ReplaceAll(content, "```json", "")
+	content = strings.ReplaceAll(content, "```", "")
+	content = strings.TrimSpace(content)
+	if i := strings.IndexByte(content, '['); i >= 0 {
+		if j := strings.LastIndexByte(content, ']'); j > i {
+			content = content[i : j+1]
+		}
+	}
+	var entries []helpEntry
+	if err := json.Unmarshal([]byte(content), &entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 func helpGenerateCache(force bool) (*helpCacheData, error) {
@@ -228,31 +432,41 @@ func helpGenerateCache(force bool) (*helpCacheData, error) {
 	if err != nil {
 		return nil, err
 	}
+	live := helpLiveCommand()
 
-	var groups []helpGroup
+	entries := make([]helpEntry, 0, len(sources))
+	seen := make(map[string]bool)
 	for _, src := range sources {
 		parsed, err := helpAnalyzeFile(string(src.Code))
 		if err != nil {
 			slog.Error("❌ Error generando ayuda para "+src.Name+":", "error", err)
 			continue
 		}
-		groups = append(groups, parsed...)
-	}
-
-	aliasMap := make(map[string]helpGroup)
-	for _, group := range groups {
-		for _, cmd := range group.Commands {
-			key := strings.ToLower(strings.TrimPrefix(cmd, "."))
-			aliasMap[key] = group
-			aliasMap["."+key] = group
+		for _, e := range parsed {
+			e = helpNormalizeEntry(e)
+			if e.Command == "" || seen[e.Command] || !helpCommandExists(e.Command, live) {
+				continue
+			}
+			seen[e.Command] = true
+			entries = append(entries, e)
 		}
 	}
 
+	sort.SliceStable(entries, func(i, j int) bool {
+		ci, cj := entries[i].Category, entries[j].Category
+		pi, pj := helpCategoryOrder(ci), helpCategoryOrder(cj)
+		if pi != pj {
+			return pi < pj
+		}
+		return entries[i].Command < entries[j].Command
+	})
+
 	data := &helpCacheData{
+		Version:     helpCacheVersion,
 		GeneratedAt: time.Now().UnixMilli(),
 		AddonsHash:  hash,
-		Groups:      groups,
-		AliasMap:    aliasMap,
+		Entries:     entries,
+		AliasMap:    helpBuildAliasMap(entries),
 	}
 
 	helpMu.Lock()
@@ -265,7 +479,16 @@ func helpGenerateCache(force bool) (*helpCacheData, error) {
 	return data, nil
 }
 
-func helpAnalyzeFile(code string) ([]helpGroup, error) {
+func helpCategoryOrder(key string) int {
+	for i, c := range helpCategories {
+		if c.Key == key {
+			return i
+		}
+	}
+	return len(helpCategories)
+}
+
+func helpAnalyzeFile(code string) ([]helpEntry, error) {
 	body := map[string]any{
 		"model": "deepseek-chat",
 		"messages": []map[string]any{
@@ -313,17 +536,7 @@ func helpAnalyzeFile(code string) ([]helpGroup, error) {
 	if len(decoded.Choices) == 0 {
 		return nil, fmt.Errorf("respuesta sin choices")
 	}
-
-	content := decoded.Choices[0].Message.Content
-	content = strings.ReplaceAll(content, "```json", "")
-	content = strings.ReplaceAll(content, "```", "")
-	content = strings.TrimSpace(content)
-
-	var groups []helpGroup
-	if err := json.Unmarshal([]byte(content), &groups); err != nil {
-		return nil, err
-	}
-	return groups, nil
+	return helpParseLLMEntries(decoded.Choices[0].Message.Content)
 }
 
 func helpRegenerateIfStale() chan struct{} {
@@ -364,10 +577,126 @@ func helpRegenerateIfStale() chan struct{} {
 	return ch
 }
 
+// ─── Plantillas fijas ──────────────────────────────────────────────────────
+
+func helpApplyPrefix(text, prefix string) string {
+	if prefix == "" {
+		prefix = "."
+	}
+	return strings.ReplaceAll(text, "{p}", prefix)
+}
+
+func helpCommandLabel(command, prefix string) string {
+	return helpApplyPrefix("{p}"+command, prefix)
+}
+
+func helpEntriesInCategory(data *helpCacheData, cat helpCategory, includeAdmin bool) []helpEntry {
+	if data == nil {
+		return nil
+	}
+	var out []helpEntry
+	for _, e := range data.Entries {
+		if e.Hidden || (e.AdminOnly && !includeAdmin) {
+			continue
+		}
+		if cat.Key == "admin" && !e.AdminOnly {
+			continue
+		}
+		if helpCanonicalCategory(e.Category) == cat.Key {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func helpRenderMenu(data *helpCacheData, prefix string) string {
+	var b strings.Builder
+	b.WriteString("📖 Comandos del bot")
+	for _, cat := range helpCategories {
+		if cat.Admin {
+			continue
+		}
+		entries := helpEntriesInCategory(data, cat, false)
+		if len(entries) == 0 {
+			continue
+		}
+		labels := make([]string, 0, len(entries))
+		for _, e := range entries {
+			labels = append(labels, helpCommandLabel(e.Command, prefix))
+		}
+		b.WriteString("\n\n" + cat.Name + "\n" + strings.Join(labels, " • "))
+	}
+	b.WriteString("\n\n" + helpApplyPrefix("💡 Escribe {p}help <comando> para ver cómo usarlo (ej: {p}help st).", prefix))
+	b.WriteString("\n" + helpApplyPrefix("📂 También puedes ver una categoría: {p}help stickers.", prefix))
+	return b.String()
+}
+
+func helpRenderCategory(data *helpCacheData, prefix string, cat helpCategory) string {
+	entries := helpEntriesInCategory(data, cat, true)
+	var b strings.Builder
+	b.WriteString(cat.Name)
+	if len(entries) == 0 {
+		b.WriteString("\n\nAún no hay comandos en esta categoría.")
+	} else {
+		for _, e := range entries {
+			b.WriteString("\n" + helpCommandLabel(e.Command, prefix) + " — " + e.Title)
+		}
+	}
+	b.WriteString("\n\n" + helpApplyPrefix("💡 Escribe {p}help <comando> para ver cómo usarlo.", prefix))
+	return b.String()
+}
+
+func helpRenderEntry(e helpEntry, prefix string) string {
+	var b strings.Builder
+	b.WriteString(helpCategoryEmoji(e.Category) + " " + helpCommandLabel(e.Command, prefix))
+	aliases := make([]string, 0, len(e.Aliases))
+	for _, a := range e.Aliases {
+		if a != e.Command {
+			aliases = append(aliases, helpCommandLabel(a, prefix))
+		}
+	}
+	if len(aliases) > 0 {
+		b.WriteString(" (también: " + strings.Join(aliases, ", ") + ")")
+	}
+	b.WriteString(" — " + e.Title)
+	if e.Description != "" {
+		b.WriteString("\n" + helpApplyPrefix(e.Description, prefix))
+	}
+	if len(e.HowTo) > 0 {
+		b.WriteString("\n\nCómo usarlo:")
+		for _, step := range e.HowTo {
+			b.WriteString("\n• " + helpApplyPrefix(step, prefix))
+		}
+	}
+	if len(e.Options) > 0 {
+		b.WriteString("\n\nOpciones útiles:")
+		for _, opt := range e.Options {
+			b.WriteString("\n• " + helpApplyPrefix(opt, prefix))
+		}
+	}
+	if len(e.Examples) > 0 {
+		b.WriteString("\n\nEjemplos:")
+		for _, ex := range e.Examples {
+			b.WriteString("\n• " + helpApplyPrefix(ex, prefix))
+		}
+	}
+	return b.String()
+}
+
+func helpRenderUnknown(query, prefix string) string {
+	return "❓ No encontré ayuda para \"" + query + "\".\n" +
+		helpApplyPrefix("💡 Escribe {p}help para ver todo lo que puedes hacer.", prefix)
+}
+
 // Handle replica el handler del addon original.
 func (Help) Handle(ctx *core.Context) error {
 	if ctx == nil {
 		return nil
+	}
+
+	prefix := ctx.Prefix
+	if prefix == "" {
+		prefix = "."
 	}
 
 	subCmd := ""
@@ -383,11 +712,11 @@ func (Help) Handle(ctx *core.Context) error {
 		helpMu.Unlock()
 		if _, err := helpGenerateCache(true); err != nil {
 			slog.Error("error actualizando ayuda", "error", err)
-			_ = ctx.SendQuoted(core.TextMessage("❌ Falló la actualización."), ctx.Message)
+			_ = ctx.SendQuoted(core.TextMessage("❌ No pude actualizar la ayuda ahora mismo."), ctx.Message)
 			_ = ctx.React("❌")
 			return nil
 		}
-		_ = ctx.SendQuoted(core.TextMessage("✅ Ayuda actualizada con éxito."), ctx.Message)
+		_ = ctx.SendQuoted(core.TextMessage("✅ La ayuda ya está al día."), ctx.Message)
 		_ = ctx.React("✅")
 		return nil
 	}
@@ -405,7 +734,7 @@ func (Help) Handle(ctx *core.Context) error {
 		_ = ctx.React("⏳")
 		generated, err := helpGenerateCache(false)
 		if err != nil {
-			return ctx.SendText("❌ Error generando ayuda. Intenta más tarde.")
+			return ctx.SendText("❌ La ayuda no está lista todavía. Inténtalo en un momento.")
 		}
 		data = generated
 	}
@@ -420,60 +749,28 @@ func (Help) Handle(ctx *core.Context) error {
 		helpMu.Unlock()
 	}
 
-	commandQuery := ""
-	if len(ctx.Args) > 0 {
-		commandQuery = strings.ToLower(ctx.Args[0])
-	}
-
-	if commandQuery == "" {
-		groups := append([]helpGroup(nil), data.Groups...)
-		coll := collate.New(language.Spanish)
-		sort.SliceStable(groups, func(i, j int) bool {
-			a := ""
-			b := ""
-			if len(groups[i].Commands) > 0 {
-				a = groups[i].Commands[0]
-			}
-			if len(groups[j].Commands) > 0 {
-				b = groups[j].Commands[0]
-			}
-			return coll.CompareString(a, b) < 0
-		})
-
-		lines := make([]string, 0, len(groups))
-		for _, group := range groups {
-			quoted := make([]string, 0, len(group.Commands))
-			for _, c := range group.Commands {
-				quoted = append(quoted, "*"+c+"*")
-			}
-			lines = append(lines, "• "+strings.Join(quoted, "/")+": "+group.Preview)
-		}
-		menu := fmt.Sprintf("📚 *Menú de Comandos* (%d)\n\n%s\n\n💡 Usa *.help <comando>* para detalles.\n🔄 Usa *.help update* para regenerar la ayuda.",
-			len(lines), strings.Join(lines, "\n"))
-		if err := ctx.SendQuoted(core.TextMessage(menu), ctx.Message); err != nil {
+	if subCmd == "" {
+		if err := ctx.SendQuoted(core.TextMessage(helpRenderMenu(data, prefix)), ctx.Message); err != nil {
 			return err
 		}
-		return ctx.React("📚")
+		return ctx.React("📖")
 	}
 
-	searchKey := commandQuery
-	if !strings.HasPrefix(searchKey, ".") {
-		searchKey = "." + searchKey
-	}
-	group, ok := data.AliasMap[searchKey]
-	if !ok {
-		fallback := strings.TrimPrefix(commandQuery, ".")
-		group, ok = data.AliasMap[fallback]
-	}
-	if !ok {
-		_ = ctx.SendText(`❓ No encontré ayuda para "` + commandQuery + `".`)
-		return ctx.React("❓")
+	if cat, ok := helpResolveCategory(subCmd); ok {
+		if err := ctx.SendQuoted(core.TextMessage(helpRenderCategory(data, prefix, cat)), ctx.Message); err != nil {
+			return err
+		}
+		return ctx.React("📂")
 	}
 
-	aliases := strings.Join(group.Commands, ", ")
-	detail := "⚙️ *" + aliases + "*\n" + group.Technical
-	if err := ctx.SendQuoted(core.TextMessage(detail), ctx.Message); err != nil {
-		return err
+	key := helpNormalize(subCmd)
+	if idx, ok := data.AliasMap[key]; ok && idx >= 0 && idx < len(data.Entries) {
+		if err := ctx.SendQuoted(core.TextMessage(helpRenderEntry(data.Entries[idx], prefix)), ctx.Message); err != nil {
+			return err
+		}
+		return ctx.React("ℹ️")
 	}
-	return ctx.React("ℹ️")
+
+	_ = ctx.SendQuoted(core.TextMessage(helpRenderUnknown(ctx.Args[0], prefix)), ctx.Message)
+	return ctx.React("❓")
 }
