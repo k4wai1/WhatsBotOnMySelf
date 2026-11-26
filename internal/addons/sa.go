@@ -698,7 +698,7 @@ func saMimeExt(mimetype string) string {
 // ─── EXIF opcional (pack name / publisher) ────────────────────────────────
 
 func saPackName() string {
-	return wagoGetenv("STICKER_PACK_NAME", wagoGetenv("SA_PACK_NAME", "Yruppa Bot • Free/Gratis"))
+	return wagoGetenv("STICKER_PACK_NAME", wagoGetenv("SA_PACK_NAME", "˚｡•Wboms • Free • Opensource✮⋆˙"))
 }
 
 func saPackPublisher() string {

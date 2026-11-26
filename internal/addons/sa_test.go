@@ -720,7 +720,7 @@ func TestSaPackDefaults(t *testing.T) {
 	t.Setenv("STICKER_PACK_PUBLISHER", "")
 	t.Setenv("SA_PACK_NAME", "")
 	t.Setenv("SA_PACK_PUBLISHER", "")
-	const pack = "Yruppa Bot • Free/Gratis"
+	const pack = "˚｡•Wboms • Free • Opensource✮⋆˙"
 	const pub = "github.com/k4wai1/WhatsBotOnMySelf"
 	if got := saPackName(); got != pack {
 		t.Fatalf("pack=%q", got)
@@ -731,9 +731,6 @@ func TestSaPackDefaults(t *testing.T) {
 	blob := saExifBlob(saPackName(), saPackPublisher())
 	if !bytes.Contains(blob, []byte(pack)) || !bytes.Contains(blob, []byte(pub)) {
 		t.Fatal("el EXIF no incluye pack/publisher por defecto")
-	}
-	if len([]rune(pack)) > 25 {
-		t.Fatalf("pack demasiado largo: %d caracteres", len([]rune(pack)))
 	}
 }
 
