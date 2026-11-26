@@ -7,6 +7,8 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -85,5 +87,53 @@ func TestWallpaperSearchErrorHTTP(t *testing.T) {
 	}
 	if _, err := wallpaperFetchImage(srv.URL + "/x"); err == nil {
 		t.Fatal("esperaba error HTTP al descargar")
+	}
+}
+
+func TestWallpaperAPIURLRelevancia(t *testing.T) {
+	prevInt := randIntN
+	randIntN = func(int) int { return 3 }
+	t.Cleanup(func() { randIntN = prevInt })
+
+	parsed, err := url.Parse(wallpaperAPIURL("gatos cyberpunk"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := parsed.Query()
+	if q.Get("q") != "gatos cyberpunk" || q.Get("sorting") != "relevance" || q.Get("page") != "1" {
+		t.Fatalf("query con término=%v", q)
+	}
+
+	parsed, err = url.Parse(wallpaperAPIURL(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q = parsed.Query()
+	if q.Get("page") != "4" || q.Get("sorting") != "" || q.Get("q") != "" {
+		t.Fatalf("query sin término=%v", q)
+	}
+}
+
+func TestWallpaperPickFavoreceRelevancia(t *testing.T) {
+	items := make([]wallpaperItem, 30)
+	for i := range items {
+		items[i] = wallpaperItem{Path: "p" + strconv.Itoa(i)}
+	}
+	prevRand, prevInt := wallpaperRandFloat, randIntN
+	t.Cleanup(func() { wallpaperRandFloat, randIntN = prevRand, prevInt })
+
+	wallpaperRandFloat = func() float64 { return 0 }
+	if got := wallpaperPick(items, "gatos"); got.Path != "p0" {
+		t.Fatalf("debió elegir el primero: %q", got.Path)
+	}
+
+	wallpaperRandFloat = func() float64 { return 0.999999 }
+	if got := wallpaperPick(items, "gatos"); got.Path != "p11" {
+		t.Fatalf("no debía salir del top 12: %q", got.Path)
+	}
+
+	randIntN = func(n int) int { return n - 1 }
+	if got := wallpaperPick(items, ""); got.Path != "p29" {
+		t.Fatalf("sin término debía seguir aleatorio: %q", got.Path)
 	}
 }

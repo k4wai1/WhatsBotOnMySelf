@@ -120,7 +120,9 @@ var wagoGroupInfoFn = func(ctx *core.Context) (*types.GroupInfo, error) {
 	if ctx == nil || ctx.Client == nil {
 		return nil, wagoErrNoClient
 	}
-	return ctx.Client.GetGroupInfo(context.Background(), ctx.ChatJID())
+	reqCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return ctx.Client.GetGroupInfo(reqCtx, ctx.ChatJID())
 }
 
 func wagoGroupInfo(ctx *core.Context) (*types.GroupInfo, error) {

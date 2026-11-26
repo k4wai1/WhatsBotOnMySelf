@@ -700,8 +700,13 @@ func saMimeExt(mimetype string) string {
 
 // ─── EXIF opcional (pack name / publisher) ────────────────────────────────
 
-func saPackName() string      { return wagoGetenv("SA_PACK_NAME", "WhatsBotOnMySelf") }
-func saPackPublisher() string { return wagoGetenv("SA_PACK_PUBLISHER", "WhatsBot") }
+func saPackName() string {
+	return wagoGetenv("SA_PACK_NAME", "ᐟ⋆｡Wboms Bot • Free • Opensource •°✩　")
+}
+
+func saPackPublisher() string {
+	return wagoGetenv("SA_PACK_PUBLISHER", "https://github.com/k4wai1/WhatsBotOnMySelf")
+}
 
 // saExifBlob construye un EXIF mínimo con UserComment en ASCII.
 func saExifBlob(pack, publisher string) []byte {

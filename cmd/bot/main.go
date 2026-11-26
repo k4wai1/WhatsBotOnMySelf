@@ -121,10 +121,31 @@ func run() error {
 
 	var reconnecting sync.Mutex
 
+	// Los handlers de whatsmeow se ejecutan dentro del event loop: si un
+	// addon bloquea (red, DB, ffmpeg), se congela toda la conexión. Procesamos
+	// los mensajes en un worker propio, en orden y con recover.
+	mensajes := make(chan *events.Message, 64)
+	go func() {
+		for msg := range mensajes {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						logger.Error("panic al procesar mensaje", "error", r)
+					}
+				}()
+				router.ProcessMessage(msg)
+			}()
+		}
+	}()
+
 	client.AddEventHandler(func(evt any) {
 		switch v := evt.(type) {
 		case *events.Message:
-			router.ProcessMessage(v)
+			select {
+			case mensajes <- v:
+			default:
+				logger.Warn("buffer de mensajes lleno, se descarta un evento")
+			}
 
 		case *events.Contact:
 			jid := v.JID.String()

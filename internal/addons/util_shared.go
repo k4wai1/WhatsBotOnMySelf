@@ -21,7 +21,9 @@ var wagoEnviarHook = func(client *whatsmeow.Client, jid types.JID, msg *waE2E.Me
 	if client == nil {
 		return "", fmt.Errorf("sin cliente")
 	}
-	resp, err := client.SendMessage(context.Background(), jid, msg)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := client.SendMessage(ctx, jid, msg)
 	if err != nil {
 		return "", err
 	}
@@ -33,7 +35,9 @@ var wagoEditarHook = func(client *whatsmeow.Client, jid types.JID, msgID, texto 
 	if client == nil || msgID == "" {
 		return fmt.Errorf("sin cliente o identificador de mensaje")
 	}
-	_, err := client.SendMessage(context.Background(), jid,
+	reqCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := client.SendMessage(reqCtx, jid,
 		client.BuildEdit(jid, types.MessageID(msgID), core.TextMessage(texto)))
 	return err
 }

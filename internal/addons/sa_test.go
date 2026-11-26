@@ -709,3 +709,20 @@ func TestSaBuildWebPTransformacionesFFmpeg(t *testing.T) {
 		}
 	}
 }
+
+func TestSaPackDefaults(t *testing.T) {
+	t.Setenv("SA_PACK_NAME", "")
+	t.Setenv("SA_PACK_PUBLISHER", "")
+	const pack = "ᐟ⋆｡Wboms Bot • Free • Opensource •°✩　"
+	const pub = "https://github.com/k4wai1/WhatsBotOnMySelf"
+	if got := saPackName(); got != pack {
+		t.Fatalf("pack=%q", got)
+	}
+	if got := saPackPublisher(); got != pub {
+		t.Fatalf("publisher=%q", got)
+	}
+	blob := saExifBlob(saPackName(), saPackPublisher())
+	if !bytes.Contains(blob, []byte(pack)) || !bytes.Contains(blob, []byte(pub)) {
+		t.Fatal("el EXIF no incluye pack/publisher por defecto")
+	}
+}

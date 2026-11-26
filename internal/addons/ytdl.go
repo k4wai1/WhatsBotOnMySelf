@@ -228,6 +228,17 @@ func (y Ytdl) Handle(ctx *core.Context) error {
 		return ytdlReply(ctx, ytdlHelpText(prefix))
 	}
 
+	// ─── Enlaces de X/Twitter: manejador nativo, sin yt-dlp ───────────────
+	if statusID, _ := twitterStatusID(raw); statusID != "" {
+		redirigido := *ctx
+		redirigido.Command = "x"
+		redirigido.Args = append([]string(nil), cleanArgs...)
+		if compress {
+			redirigido.Args = append(redirigido.Args, "zip")
+		}
+		return (Twitter{}).Handle(&redirigido)
+	}
+
 	lower := strings.ToLower(raw)
 	isDirect := strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
 

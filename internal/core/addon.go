@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -16,6 +17,8 @@ import (
 
 	"whatsbot-go/internal/store"
 )
+
+const coreNetTimeout = 20 * time.Second
 
 // Context es el equivalente del handler(sock, msg, args, store) de Node.js.
 type Context struct {
@@ -91,7 +94,9 @@ func (c *Context) SendMessage(msg *waE2E.Message) error {
 	if c.Client == nil || c.Message == nil {
 		return nil
 	}
-	_, err := c.Client.SendMessage(context.Background(), c.Message.Info.Chat, msg)
+	netCtx, cancel := context.WithTimeout(context.Background(), coreNetTimeout)
+	defer cancel()
+	_, err := c.Client.SendMessage(netCtx, c.Message.Info.Chat, msg)
 	return err
 }
 
@@ -114,7 +119,9 @@ func (c *Context) sendWithID(msg *waE2E.Message) (types.MessageID, error) {
 	if c.Client == nil || c.Message == nil {
 		return "", nil
 	}
-	resp, err := c.Client.SendMessage(context.Background(), c.Message.Info.Chat, msg)
+	netCtx, cancel := context.WithTimeout(context.Background(), coreNetTimeout)
+	defer cancel()
+	resp, err := c.Client.SendMessage(netCtx, c.Message.Info.Chat, msg)
 	if err != nil {
 		return "", err
 	}
@@ -133,7 +140,9 @@ func (c *Context) RevokeMessage(id types.MessageID) error {
 		return nil
 	}
 	chat := c.Message.Info.Chat
-	_, err := c.Client.SendMessage(context.Background(), chat,
+	netCtx, cancel := context.WithTimeout(context.Background(), coreNetTimeout)
+	defer cancel()
+	_, err := c.Client.SendMessage(netCtx, chat,
 		c.Client.BuildRevoke(chat, types.EmptyJID, id))
 	return err
 }
@@ -164,7 +173,9 @@ func (c *Context) React(emoji string) error {
 		return nil
 	}
 	reaction := c.Client.BuildReaction(c.Message.Info.Chat, c.Message.Info.Sender, c.Message.Info.ID, emoji)
-	_, err := c.Client.SendMessage(context.Background(), c.Message.Info.Chat, reaction)
+	netCtx, cancel := context.WithTimeout(context.Background(), coreNetTimeout)
+	defer cancel()
+	_, err := c.Client.SendMessage(netCtx, c.Message.Info.Chat, reaction)
 	return err
 }
 
@@ -190,7 +201,9 @@ func (c *Context) DownloadMedia() ([]byte, error) {
 	if target == nil {
 		return nil, nil
 	}
-	return c.Client.Download(context.Background(), target)
+	netCtx, cancel := context.WithTimeout(context.Background(), coreNetTimeout)
+	defer cancel()
+	return c.Client.Download(netCtx, target)
 }
 
 // downloadableMedia devuelve el sub-mensaje con los metadatos de descarga.

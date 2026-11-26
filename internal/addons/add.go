@@ -16,6 +16,8 @@ import (
 	"whatsbot-go/internal/core"
 )
 
+const addNetTimeout = 12 * time.Second
+
 // Add porta addons/add.js: agrega contactos al grupo con fallback a enlace.
 type Add struct{}
 
@@ -33,7 +35,9 @@ var (
 		if client == nil {
 			return false, types.EmptyJID
 		}
-		resp, err := client.IsOnWhatsApp(context.Background(), addWhatsAppQuery(number))
+		reqCtx, cancel := context.WithTimeout(context.Background(), addNetTimeout)
+		defer cancel()
+		resp, err := client.IsOnWhatsApp(reqCtx, addWhatsAppQuery(number))
 		if err != nil || len(resp) == 0 {
 			return false, types.EmptyJID
 		}
@@ -79,7 +83,9 @@ func (Add) Handle(ctx *core.Context) error {
 		return ctx.Reply("📩 Envía el contacto o escribe el número (30s)...")
 	}
 
-	resp, err := ctx.Client.SendMessage(context.Background(), ctx.ChatJID(),
+	reqCtx, cancel := context.WithTimeout(context.Background(), addNetTimeout)
+	defer cancel()
+	resp, err := ctx.Client.SendMessage(reqCtx, ctx.ChatJID(),
 		core.TextMessage("📩 Envía el contacto o escribe el número (30s)..."))
 	if err != nil {
 		return ctx.React("❌")
@@ -89,10 +95,10 @@ func (Add) Handle(ctx *core.Context) error {
 	key := ctx.ChatJID().String() + "|" + ctx.SenderJID().String()
 	collector.Handler = ctx.Client.AddEventHandler(func(evt any) {
 		msg, ok := evt.(*events.Message)
-		if !ok {
+		if !ok || collector == nil {
 			return
 		}
-		addCollect(collector, ctx.Client, msg)
+		go addCollect(collector, ctx.Client, msg)
 	})
 	collector.Timer = time.AfterFunc(addTimeout, func() {
 		addMu.Lock()
@@ -100,7 +106,9 @@ func (Add) Handle(ctx *core.Context) error {
 		delete(addCollectors, key)
 		addMu.Unlock()
 		if !collected && ctx.Client != nil && collector.PromptID != "" {
-			ctx.Client.SendMessage(context.Background(), collector.Chat, ctx.Client.BuildRevoke(collector.Chat, types.EmptyJID, types.MessageID(collector.PromptID)))
+			revokeCtx, revokeCancel := context.WithTimeout(context.Background(), addNetTimeout)
+			_, _ = ctx.Client.SendMessage(revokeCtx, collector.Chat, ctx.Client.BuildRevoke(collector.Chat, types.EmptyJID, types.MessageID(collector.PromptID)))
+			revokeCancel()
 		}
 		if ctx.Client != nil {
 			ctx.Client.RemoveEventHandler(collector.Handler)
@@ -129,6 +137,7 @@ func addCollect(collector *addCollector, client *whatsmeow.Client, msg *events.M
 		addMu.Unlock()
 		return
 	}
+	collector.Collected = true
 	addMu.Unlock()
 
 	numbers := addNumbersFromMessage(msg.Message)
@@ -136,7 +145,6 @@ func addCollect(collector *addCollector, client *whatsmeow.Client, msg *events.M
 		if client != nil && collector.PromptID != "" {
 			_ = wagoEditarHook(client, collector.Chat, collector.PromptID, "❌ No se detectó un número válido.")
 		}
-		collector.Collected = true
 		if collector.Timer != nil {
 			collector.Timer.Stop()
 		}
@@ -148,7 +156,6 @@ func addCollect(collector *addCollector, client *whatsmeow.Client, msg *events.M
 		addMu.Unlock()
 		return
 	}
-	collector.Collected = true
 	if collector.Timer != nil {
 		collector.Timer.Stop()
 	}
@@ -224,6 +231,8 @@ func addNumbersFromMessage(msg *waE2E.Message) []string {
 }
 
 func addProcessNumbers(client *whatsmeow.Client, collector *addCollector, numbers []string) {
+	reqCtx, cancel := context.WithTimeout(context.Background(), addNetTimeout)
+	defer cancel()
 	for _, n := range numbers {
 		if n == "" || client == nil {
 			continue
@@ -231,25 +240,25 @@ func addProcessNumbers(client *whatsmeow.Client, collector *addCollector, number
 		jid := types.NewJID(n, types.DefaultUserServer)
 		ok, real := addOnWhatsApp(client, n)
 		if !ok {
-			client.SendMessage(context.Background(), collector.Chat,
+			client.SendMessage(reqCtx, collector.Chat,
 				core.TextMessage("⚠️ El número *"+n+"* no está en WhatsApp."))
 			continue
 		}
 		if real.User != "" {
 			jid = real.ToNonAD()
 		}
-		_, err := client.UpdateGroupParticipants(context.Background(), collector.Chat, []types.JID{jid}, whatsmeow.ParticipantChangeAdd)
+		_, err := client.UpdateGroupParticipants(reqCtx, collector.Chat, []types.JID{jid}, whatsmeow.ParticipantChangeAdd)
 		if err != nil {
-			if link, linkErr := client.GetGroupInviteLink(context.Background(), collector.Chat, false); linkErr == nil {
-				client.SendMessage(context.Background(), collector.Sender,
+			if link, linkErr := client.GetGroupInviteLink(reqCtx, collector.Chat, false); linkErr == nil {
+				client.SendMessage(reqCtx, collector.Sender,
 					core.TextMessage("🔗 Enlace para *"+n+"*:\n"+link))
-				client.SendMessage(context.Background(), collector.Chat, client.BuildReaction(collector.Chat, collector.Sender, types.MessageID(collector.PromptID), "📨"))
+				client.SendMessage(reqCtx, collector.Chat, client.BuildReaction(collector.Chat, collector.Sender, types.MessageID(collector.PromptID), "📨"))
 				continue
 			}
-			client.SendMessage(context.Background(), collector.Chat, core.TextMessage("❌ No pude generar el enlace de invitación."))
+			client.SendMessage(reqCtx, collector.Chat, core.TextMessage("❌ No pude generar el enlace de invitación."))
 			continue
 		}
-		client.SendMessage(context.Background(), collector.Chat, client.BuildReaction(collector.Chat, collector.Sender, types.MessageID(collector.PromptID), "✅"))
+		client.SendMessage(reqCtx, collector.Chat, client.BuildReaction(collector.Chat, collector.Sender, types.MessageID(collector.PromptID), "✅"))
 	}
 }
 
@@ -260,6 +269,8 @@ func addWithFallback(ctx *core.Context, number string, originalID types.MessageI
 	if client == nil {
 		return ctx.React("❌")
 	}
+	reqCtx, cancel := context.WithTimeout(context.Background(), addNetTimeout)
+	defer cancel()
 	jid := types.NewJID(number, types.DefaultUserServer)
 	ok, real := addOnWhatsApp(client, number)
 	if !ok {
@@ -268,10 +279,10 @@ func addWithFallback(ctx *core.Context, number string, originalID types.MessageI
 	if real.User != "" {
 		jid = real.ToNonAD()
 	}
-	if _, err := client.UpdateGroupParticipants(context.Background(), ctx.ChatJID(), []types.JID{jid}, whatsmeow.ParticipantChangeAdd); err == nil {
+	if _, err := client.UpdateGroupParticipants(reqCtx, ctx.ChatJID(), []types.JID{jid}, whatsmeow.ParticipantChangeAdd); err == nil {
 		return ctx.React("✅")
 	}
-	link, err := client.GetGroupInviteLink(context.Background(), ctx.ChatJID(), false)
+	link, err := client.GetGroupInviteLink(reqCtx, ctx.ChatJID(), false)
 	if err != nil {
 		return ctx.Reply("❌ No pude generar el enlace de invitación.")
 	}

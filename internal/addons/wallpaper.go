@@ -11,6 +11,7 @@ import (
 	"image/jpeg"
 	"io"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -24,10 +25,16 @@ import (
 
 const wallpaperMaxBytes = 25 * 1024 * 1024
 
+// Cuántos resultados de la página relevante se consideran al elegir.
+const wallpaperTopResults = 12
+
 const wallpaperUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
-// wallpaperHTTP es inyectable en las pruebas.
-var wallpaperHTTP = http.DefaultClient
+// wallpaperHTTP y wallpaperRandFloat son inyectables en las pruebas.
+var (
+	wallpaperHTTP      = http.DefaultClient
+	wallpaperRandFloat = rand.Float64
+)
 
 type wallpaperItem struct {
 	Path       string `json:"path"`
@@ -58,15 +65,7 @@ func (w Wallpaper) Handle(ctx *core.Context) error {
 		return reactErr
 	}
 
-	apiURL := "https://wallhaven.cc/api/v1/search"
-	params := url.Values{}
-	if query != "" {
-		params.Set("q", query)
-	}
-	params.Set("page", strconv.Itoa(1+randIntN(5)))
-	apiURL += "?" + params.Encode()
-
-	items, err := wallpaperSearch(apiURL)
+	items, err := wallpaperSearch(wallpaperAPIURL(query))
 	if err != nil {
 		return wallpaperFail(ctx, err)
 	}
@@ -77,7 +76,7 @@ func (w Wallpaper) Handle(ctx *core.Context) error {
 		return ctx.Reply("Sin resultados para esa búsqueda.")
 	}
 
-	pick := items[randIntN(len(items))]
+	pick := wallpaperPick(items, query)
 	if reactErr := ctx.React("⏳"); reactErr != nil {
 		return reactErr
 	}
@@ -105,6 +104,54 @@ func (w Wallpaper) Handle(ctx *core.Context) error {
 		return wallpaperFail(ctx, err)
 	}
 	return ctx.React("✅")
+}
+
+// wallpaperAPIURL construye la consulta. Con término de búsqueda se pide
+// orden por relevancia en la primera página; sin término se mantiene la
+// exploración aleatoria original.
+func wallpaperAPIURL(query string) string {
+	params := url.Values{}
+	if query != "" {
+		params.Set("q", query)
+		params.Set("sorting", "relevance")
+		params.Set("order", "desc")
+		params.Set("page", "1")
+	} else {
+		params.Set("page", strconv.Itoa(1+randIntN(5)))
+	}
+	return "https://wallhaven.cc/api/v1/search?" + params.Encode()
+}
+
+// wallpaperPick elige entre los primeros resultados con peso decreciente:
+// los más relevantes son mucho más probables, pero no siempre el primero.
+func wallpaperPick(items []wallpaperItem, query string) wallpaperItem {
+	if len(items) == 0 {
+		return wallpaperItem{}
+	}
+	if strings.TrimSpace(query) == "" || len(items) == 1 {
+		return items[randIntN(len(items))]
+	}
+
+	n := len(items)
+	if n > wallpaperTopResults {
+		n = wallpaperTopResults
+	}
+	weights := make([]float64, n)
+	total := 0.0
+	for i := range weights {
+		weights[i] = 1 / math.Pow(float64(i+1), 1.5)
+		total += weights[i]
+	}
+
+	r := wallpaperRandFloat() * total
+	acc := 0.0
+	for i, weight := range weights {
+		acc += weight
+		if r < acc {
+			return items[i]
+		}
+	}
+	return items[n-1]
 }
 
 func wallpaperSearch(apiURL string) ([]wallpaperItem, error) {

@@ -37,6 +37,17 @@ const (
 
 var stickersCmds = map[string]bool{"st": true, "sticker": true, "s": true}
 
+// stickersApplyExif inyecta el pack name / publisher en el WebP del sticker.
+func stickersApplyExif(webp []byte) []byte {
+	if len(webp) == 0 {
+		return webp
+	}
+	if out := saApplyExif(webp); len(out) > 0 && len(out) <= stickersAnimatedLimit {
+		return out
+	}
+	return webp
+}
+
 // Inyectables para pruebas.
 var (
 	stickersExec            = exec.CommandContext
@@ -195,6 +206,7 @@ func (Stickers) Handle(ctx *core.Context) error {
 		return ctx.React("❌")
 	}
 
+	final = stickersApplyExif(final)
 	limit := stickersStaticLimit
 	if isAnimatedInput {
 		limit = stickersAnimatedLimit
@@ -381,6 +393,7 @@ func stickersProcessCollection(session *stickersSession, jid string) {
 			_ = ctx.SendText("❌ Error al procesar uno de los archivos.")
 			continue
 		}
+		final = stickersApplyExif(final)
 		if len(final) == 0 || len(final) > limit {
 			_ = ctx.SendText(fmt.Sprintf("⚠️ Un archivo supera el límite de tamaño (%d KB) y no se pudo procesar.", limit/1000))
 			continue

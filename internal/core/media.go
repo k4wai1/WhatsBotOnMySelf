@@ -62,19 +62,38 @@ func (c *Context) buildImageMessage(data []byte, caption string) (*waE2E.Message
 	}}, nil
 }
 
+// VideoMeta son metadatos opcionales para SendVideoWithMeta.
+type VideoMeta struct {
+	JPEGThumbnail []byte
+	Width         uint32
+	Height        uint32
+	Seconds       uint32
+}
+
 // SendVideo sube y envía un video.
 func (c *Context) SendVideo(data []byte, caption string, gifPlayback bool) error {
+	return c.SendVideoWithMeta(data, caption, gifPlayback, VideoMeta{})
+}
+
+// SendVideoWithMeta permite aportar miniatura, dimensiones y duración.
+func (c *Context) SendVideoWithMeta(data []byte, caption string, gifPlayback bool, meta VideoMeta) error {
 	if len(data) == 0 {
 		return fmt.Errorf("video vacío")
 	}
 	width, height := imageSize(data)
+	if meta.Width > 0 {
+		width = meta.Width
+	}
+	if meta.Height > 0 {
+		height = meta.Height
+	}
 	resp, err := c.upload(data, whatsmeow.MediaVideo)
 	if err != nil {
 		return err
 	}
 	msg := &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
 		URL:           proto.String(resp.URL),
-		Mimetype:      proto.String(detectMime(data, "video/mp4")),
+		Mimetype:      proto.String("video/mp4"),
 		Caption:       optString(caption),
 		FileSHA256:    resp.FileSHA256,
 		FileEncSHA256: resp.FileEncSHA256,
@@ -84,7 +103,14 @@ func (c *Context) SendVideo(data []byte, caption string, gifPlayback bool) error
 		Width:         proto.Uint32(width),
 		Height:        proto.Uint32(height),
 		GifPlayback:   proto.Bool(gifPlayback),
+		JPEGThumbnail: meta.JPEGThumbnail,
 	}}
+	if meta.Seconds > 0 {
+		msg.VideoMessage.Seconds = proto.Uint32(meta.Seconds)
+	}
+	if gifPlayback {
+		msg.VideoMessage.GifAttribution = waE2E.VideoMessage_NONE.Enum()
+	}
 	return c.SendMessage(msg)
 }
 
@@ -174,7 +200,9 @@ func (c *Context) SendTo(jid types.JID, msg *waE2E.Message) error {
 	if c.Client == nil || msg == nil {
 		return nil
 	}
-	_, err := c.Client.SendMessage(context.Background(), jid, msg)
+	netCtx, cancel := context.WithTimeout(context.Background(), coreNetTimeout)
+	defer cancel()
+	_, err := c.Client.SendMessage(netCtx, jid, msg)
 	return err
 }
 
@@ -217,7 +245,9 @@ func (c *Context) DownloadQuoted() ([]byte, error) {
 	if c.Client == nil {
 		return nil, fmt.Errorf("cliente no disponible")
 	}
-	return c.Client.Download(context.Background(), target)
+	netCtx, cancel := context.WithTimeout(context.Background(), coreNetTimeout)
+	defer cancel()
+	return c.Client.Download(netCtx, target)
 }
 
 // Download descarga un sub-mensaje multimedia concreto.
@@ -229,7 +259,9 @@ func (c *Context) Download(msg *waE2E.Message) ([]byte, error) {
 	if c.Client == nil {
 		return nil, fmt.Errorf("cliente no disponible")
 	}
-	return c.Client.Download(context.Background(), target)
+	netCtx, cancel := context.WithTimeout(context.Background(), coreNetTimeout)
+	defer cancel()
+	return c.Client.Download(netCtx, target)
 }
 
 func (c *Context) upload(data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
@@ -240,7 +272,9 @@ func (c *Context) upload(data []byte, mt whatsmeow.MediaType) (whatsmeow.UploadR
 		}
 		return whatsmeow.UploadResponse{}, fmt.Errorf("cliente no disponible")
 	}
-	return c.Client.Upload(context.Background(), data, mt)
+	netCtx, cancel := context.WithTimeout(context.Background(), coreNetTimeout)
+	defer cancel()
+	return c.Client.Upload(netCtx, data, mt)
 }
 
 func imageSize(data []byte) (uint32, uint32) {
