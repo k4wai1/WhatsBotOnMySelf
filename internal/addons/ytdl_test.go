@@ -635,3 +635,87 @@ func TestYtdlFallbackPerfilMinimo(t *testing.T) {
 		t.Fatalf("el último intento debía ser mínimo: %#v", calls[3])
 	}
 }
+
+func TestYtdlFindBinary(t *testing.T) {
+	t.Setenv("YTDLP_BIN", "/ruta/custom/yt-dlp")
+	if got := YtdlFindBinary(); got != "/ruta/custom/yt-dlp" {
+		t.Fatalf("YTDLP_BIN ignorado: %q", got)
+	}
+	t.Setenv("YTDLP_BIN", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "yt-dlp")
+	if err := os.WriteFile(want, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := YtdlFindBinary(); got != want {
+		t.Fatalf("binario=%q, esperaba %q", got, want)
+	}
+}
+
+func TestYtdlCancelSinMenuID(t *testing.T) {
+	s := NewYtdlSessionStore(time.Now)
+	s.StoreDownload("u1", &ytdlSession{CreatedAt: time.Now()})
+	ids, had := s.Cancel("u1")
+	if !had || len(ids) != 0 {
+		t.Fatalf("ids=%#v had=%v: la sesión existía aunque no tuviera MenuMsgID", ids, had)
+	}
+}
+
+func TestYtdlCommandEnvSinNodeIPC(t *testing.T) {
+	t.Setenv("NODE_CHANNEL_FD", "3")
+	t.Setenv("NODE_CHANNEL_SERIALIZATION_MODE", "json")
+	env := ytdlCommandEnv()
+	foundPath := false
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "NODE_CHANNEL_FD=") || strings.HasPrefix(entry, "NODE_CHANNEL_SERIALIZATION_MODE=") {
+			t.Fatalf("IPC de PM2 filtrado al subproceso: %q", entry)
+		}
+		if strings.HasPrefix(entry, "PATH=") {
+			foundPath = true
+			if !strings.Contains(entry, "/usr/local/bin") {
+				t.Fatalf("PATH sin /usr/local/bin: %q", entry)
+			}
+		}
+	}
+	if !foundPath {
+		t.Fatal("PATH no presente en el entorno del subproceso")
+	}
+}
+
+func TestYtdlSeleccionBusquedaMuestraMenuConFallbackTexto(t *testing.T) {
+	client := ytdlTestClient(t)
+	client.HTTPClient = &http.Client{Transport: ytdlRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 500, Body: ioNopCloser{bytes.NewReader(nil)}, Header: make(http.Header), Request: req}, nil
+	})}
+	client.Run = func(_ context.Context, _ string, args ...string) (string, string, error) {
+		if strings.Contains(strings.Join(args, " "), "--dump-json") {
+			return ytdlVideoJSON("a"), "", nil
+		}
+		return "", "", nil
+	}
+	svc := ytdlTestService(t, client)
+	capture := new(ytdlCapture)
+	svc.Sessions.StoreSearch(capture.ctx().SenderJID().String(), &ytdlSearchSession{
+		Results:   []ytdlSearchResult{{ID: "a", Title: "Resultado a", URL: "https://youtu.be/a"}},
+		MenuMsgID: "mosaico-viejo", CreatedAt: time.Now(),
+	})
+	if err := (Ytdl{Svc: svc}).Handle(capture.ctx("1")); err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	textos := strings.Join(capture.texts(), "\n")
+	if !strings.Contains(textos, "Selecciona resolución") || !strings.Contains(textos, "720p") {
+		t.Fatalf("no se envió el menú de resoluciones: %s", textos)
+	}
+	if len(capture.sentIDs()) != 1 {
+		t.Fatalf("debía enviarse un menú por texto: %#v", capture.sentIDs())
+	}
+	rev := capture.revokedIDs()
+	if len(rev) != 1 || rev[0] != "mosaico-viejo" {
+		t.Fatalf("revocación incorrecta: %#v", rev)
+	}
+}

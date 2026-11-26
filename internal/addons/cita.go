@@ -54,6 +54,13 @@ var (
 		}
 		return citaFetchUIAvatar(userName)
 	}
+
+	citaFetchEmoji = citaFetchTwemoji
+)
+
+var (
+	citaEmojiMu    sync.RWMutex
+	citaEmojiCache = make(map[string]image.Image)
 )
 
 var (
@@ -453,6 +460,246 @@ func citaEncodeURIComponent(s string) string {
 	return b.String()
 }
 
+// ─── Tokenización de texto + emojis ─────────────────────────────────────────
+
+type citaSegment struct {
+	text    string
+	isEmoji bool
+	code    string
+}
+
+func citaIsRegional(r rune) bool { return r >= 0x1F1E6 && r <= 0x1F1FF }
+
+func citaIsEmojiBase(r rune) bool {
+	switch {
+	case r >= 0x1F000 && r <= 0x1FAFF,
+		r >= 0x2600 && r <= 0x27BF,
+		r >= 0x2300 && r <= 0x23FF,
+		r >= 0x2B00 && r <= 0x2BFF,
+		r >= 0x2190 && r <= 0x21FF:
+		return true
+	}
+	switch r {
+	case 0x00A9, 0x00AE, 0x203C, 0x2049, 0x2120, 0x2122, 0x2139,
+		0x3030, 0x303D, 0x3297, 0x3299:
+		return true
+	}
+	return false
+}
+
+// citaIsKeycapBase detecta la base de una secuencia de tecla (#, * o dígito)
+// que va seguida de U+FE0F / U+20E3.
+func citaIsKeycapBase(runes []rune, i int) bool {
+	if i >= len(runes) {
+		return false
+	}
+	r := runes[i]
+	base := r == '#' || r == '*' || (r >= '0' && r <= '9')
+	if !base {
+		return false
+	}
+	return i+1 < len(runes) && runes[i+1] == 0x20E3 ||
+		i+2 < len(runes) && runes[i+1] == 0xFE0F && runes[i+2] == 0x20E3
+}
+
+// citaEmojiAt devuelve la longitud (en runes) de la secuencia emoji que
+// empieza en i, o 0 si ese rune es texto normal.
+func citaEmojiAt(runes []rune, i int) int {
+	r := runes[i]
+
+	if citaIsRegional(r) {
+		n := 1
+		if i+1 < len(runes) && citaIsRegional(runes[i+1]) {
+			n = 2
+		}
+		return n
+	}
+	if !citaIsEmojiBase(r) && !citaIsKeycapBase(runes, i) {
+		return 0
+	}
+	if citaIsKeycapBase(runes, i) {
+		n := 1
+		if i+n < len(runes) && runes[i+n] == 0xFE0F {
+			n++
+		}
+		if i+n < len(runes) && runes[i+n] == 0x20E3 {
+			n++
+		}
+		return n
+	}
+
+	n := 1
+	for i+n < len(runes) {
+		next := runes[i+n]
+		switch {
+		case next == 0xFE0F, next == 0x20E3,
+			next >= 0x1F3FB && next <= 0x1F3FF:
+			n++
+		case next == 0x200D && i+n+1 < len(runes) &&
+			(citaIsEmojiBase(runes[i+n+1]) || citaIsKeycapBase(runes, i+n+1)):
+			n += 2
+		default:
+			return n
+		}
+	}
+	return n
+}
+
+// citaSegments divide un string en segmentos alternos de texto y emoji.
+func citaSegments(text string) []citaSegment {
+	runes := []rune(text)
+	segs := make([]citaSegment, 0, len(runes))
+	textBuf := make([]rune, 0, len(runes))
+	flush := func() {
+		if len(textBuf) > 0 {
+			segs = append(segs, citaSegment{text: string(textBuf)})
+			textBuf = textBuf[:0]
+		}
+	}
+
+	for i := 0; i < len(runes); {
+		if n := citaEmojiAt(runes, i); n > 0 {
+			flush()
+			segs = append(segs, citaSegment{
+				isEmoji: true,
+				code:    citaEmojiCode(runes[i : i+n]),
+			})
+			i += n
+			continue
+		}
+		textBuf = append(textBuf, runes[i])
+		i++
+	}
+	flush()
+	return segs
+}
+
+// citaEmojiCode convierte una secuencia al nombre de archivo de Twemoji.
+// Regla oficial: se elimina fe0f salvo que la secuencia lleve ZWJ (200d).
+func citaEmojiCode(seq []rune) string {
+	hasZWJ := false
+	for _, r := range seq {
+		if r == 0x200D {
+			hasZWJ = true
+			break
+		}
+	}
+	var b strings.Builder
+	first := true
+	for _, r := range seq {
+		if r == 0xFE0F && !hasZWJ {
+			continue
+		}
+		if !first {
+			b.WriteByte('-')
+		}
+		if r <= 0xFFFF {
+			fmt.Fprintf(&b, "%04x", r)
+		} else {
+			fmt.Fprintf(&b, "%x", r)
+		}
+		first = false
+	}
+	return b.String()
+}
+
+// ─── Descarga y caché de Twemoji ────────────────────────────────────────────
+
+func citaFetchTwemoji(code string) (image.Image, error) {
+	if code == "" {
+		return nil, fmt.Errorf("código twemoji vacío")
+	}
+
+	citaEmojiMu.RLock()
+	img, ok := citaEmojiCache[code]
+	citaEmojiMu.RUnlock()
+	if ok && img != nil {
+		return img, nil
+	}
+
+	path := core.DataPath("cache", "twemoji", code+".png")
+	if raw, err := os.ReadFile(path); err == nil {
+		if decoded, _, err := image.Decode(bytes.NewReader(raw)); err == nil {
+			citaEmojiMu.Lock()
+			citaEmojiCache[code] = decoded
+			citaEmojiMu.Unlock()
+			return decoded, nil
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	url := "https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/72x72/" + code + ".png"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := citaHTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("twemoji %s: HTTP %d", code, res.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(res.Body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+	decoded, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
+		_ = os.WriteFile(path, raw, 0o644)
+	}
+	citaEmojiMu.Lock()
+	citaEmojiCache[code] = decoded
+	citaEmojiMu.Unlock()
+	return decoded, nil
+}
+
+// ─── Medición y dibujo mixto (texto + emojis) ───────────────────────────────
+
+func citaMeasureMixed(face font.Face, fontSize int, text string) int {
+	width := 0
+	for _, seg := range citaSegments(text) {
+		if seg.isEmoji {
+			width += fontSize + 2
+			continue
+		}
+		width += int(font.MeasureString(face, seg.text).Round())
+	}
+	return width
+}
+
+// citaDrawMixed dibuja texto con fuente y emojis con Twemoji a color.
+// Devuelve la nueva posición x.
+func citaDrawMixed(dst *image.NRGBA, src image.Image, face font.Face, fontSize, x, baseline int, text string) int {
+	return citaDrawMixedPass(dst, src, face, fontSize, x, baseline, text, true)
+}
+
+// citaDrawMixedPass permite omitir los emojis en la pasada de sombra,
+// avanzando igualmente x para que ambas pasadas queden alineadas.
+func citaDrawMixedPass(dst *image.NRGBA, src image.Image, face font.Face, fontSize, x, baseline int, text string, withEmoji bool) int {
+	for _, seg := range citaSegments(text) {
+		if seg.isEmoji {
+			if withEmoji {
+				if emoji, err := citaFetchEmoji(seg.code); err == nil && emoji != nil {
+					scaled := imaging.Resize(emoji, fontSize, fontSize, imaging.Lanczos)
+					y := baseline - int(float64(fontSize)*0.85)
+					draw.Draw(dst, image.Rect(x, y, x+fontSize, y+fontSize), scaled, image.Point{}, draw.Over)
+				}
+			}
+			x += fontSize + 2
+			continue
+		}
+		citaDrawText(dst, src, face, x, baseline, seg.text)
+		x += int(font.MeasureString(face, seg.text).Round())
+	}
+	return x
+}
+
 func citaLoadFonts() (*opentype.Font, *opentype.Font, error) {
 	citaFontOnce.Do(func() {
 		citaFontNormal, citaFontErr = opentype.Parse(goregular.TTF)
@@ -621,7 +868,7 @@ func citaDrawBlock(dst *image.NRGBA, cache *citaFaceCache, words []citaWord, fon
 		if err != nil {
 			return err
 		}
-		w := int(font.MeasureString(face, word.text).Round()) + 8
+		w := citaMeasureMixed(face, fontSize, word.text) + 8
 		if len(current) > 0 && currentWidth+w-8 > width {
 			lines = append(lines, current)
 			current = make([]laidWord, 0, 8)
@@ -648,8 +895,8 @@ func citaDrawBlock(dst *image.NRGBA, cache *citaFaceCache, words []citaWord, fon
 		ascent := fontSize
 		baseline := startY + i*lineHeight + ascent
 		for _, word := range line {
-			citaDrawText(dst, shadow, word.face, x+2, baseline+2, word.text)
-			citaDrawText(dst, white, word.face, x, baseline, word.text)
+			citaDrawMixedPass(dst, shadow, word.face, fontSize, x+2, baseline+2, word.text, false)
+			citaDrawMixedPass(dst, white, word.face, fontSize, x, baseline, word.text, true)
 			x += word.w
 		}
 	}
@@ -659,10 +906,10 @@ func citaDrawBlock(dst *image.NRGBA, cache *citaFaceCache, words []citaWord, fon
 func citaDrawUserName(dst *image.NRGBA, cache *citaFaceCache, userName, phoneNumber string, left, top, width int, _ bool) {
 	faceName, err := cache.face(false, 28)
 	if err == nil {
-		nameWidth := int(font.MeasureString(faceName, userName).Round())
+		nameWidth := citaMeasureMixed(faceName, 28, userName)
 		x := left + (width-nameWidth)/2
-		citaDrawText(dst, &image.Uniform{C: color.NRGBA{0, 0, 0, 204}}, faceName, x+1, top+29, userName)
-		citaDrawText(dst, &image.Uniform{C: color.NRGBA{238, 238, 238, 255}}, faceName, x, top+28, userName)
+		citaDrawMixedPass(dst, &image.Uniform{C: color.NRGBA{0, 0, 0, 204}}, faceName, 28, x+1, top+29, userName, false)
+		citaDrawMixedPass(dst, &image.Uniform{C: color.NRGBA{238, 238, 238, 255}}, faceName, 28, x, top+28, userName, true)
 	}
 	facePhone, err := cache.face(false, 20)
 	if err == nil {

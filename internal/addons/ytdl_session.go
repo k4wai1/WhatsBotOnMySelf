@@ -130,19 +130,22 @@ func (s *ytdlSessionStore) Cancel(sender string) ([]types.MessageID, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ids := make([]types.MessageID, 0, 2)
+	had := false
 	if session, ok := s.downloads[sender]; ok {
+		had = true
 		if session.MenuMsgID != "" {
 			ids = append(ids, session.MenuMsgID)
 		}
 		delete(s.downloads, sender)
 	}
 	if session, ok := s.searches[sender]; ok {
+		had = true
 		if session.MenuMsgID != "" {
 			ids = append(ids, session.MenuMsgID)
 		}
 		delete(s.searches, sender)
 	}
-	return ids, len(ids) > 0
+	return ids, had
 }
 
 func (s *ytdlSessionStore) Cleanup() {

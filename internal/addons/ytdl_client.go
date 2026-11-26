@@ -55,6 +55,7 @@ type ytdlClient struct {
 	MkdirTemp   func(string, string) (string, error)
 	RemoveAll   func(string) error
 	FindRuntime func() (deno, node string)
+	FindBinary  func() string
 }
 
 func NewYtdlClient() *ytdlClient {
@@ -69,6 +70,7 @@ func NewYtdlClient() *ytdlClient {
 		MkdirTemp:   os.MkdirTemp,
 		RemoveAll:   os.RemoveAll,
 		FindRuntime: YtdlFindRuntimesDefault,
+		FindBinary:  YtdlFindBinary,
 	}
 }
 
@@ -87,6 +89,52 @@ func (c *ytdlClient) tmpBase() string {
 }
 
 // ─── ejecución de yt-dlp ────────────────────────────────────────────────────
+
+// YtdlFindBinary resuelve yt-dlp sin depender del PATH recortado de PM2.
+func YtdlFindBinary() string {
+	if v := strings.TrimSpace(os.Getenv("YTDLP_BIN")); v != "" {
+		return v
+	}
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		home = os.Getenv("HOME")
+	}
+	candidates := []string{}
+	if home != "" {
+		candidates = append(candidates, filepath.Join(home, ".local", "bin", "yt-dlp"))
+	}
+	candidates = append(candidates, "/usr/local/bin/yt-dlp")
+	for _, p := range candidates {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("yt-dlp"); err == nil && p != "" {
+		return p
+	}
+	return "yt-dlp"
+}
+
+func (c *ytdlClient) binary() string {
+	if c != nil && c.FindBinary != nil {
+		if b := strings.TrimSpace(c.FindBinary()); b != "" {
+			return b
+		}
+	}
+	return YtdlFindBinary()
+}
+
+func ytdlPlayerClient(args []string) string {
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "youtube:player_client=") {
+			return strings.TrimPrefix(arg, "youtube:player_client=")
+		}
+		if arg == "--extractor-args" && i+1 < len(args) {
+			return strings.TrimPrefix(args[i+1], "youtube:player_client=")
+		}
+	}
+	return "default"
+}
 
 func (c *ytdlClient) exec(args []string, opts ytdlExecOptions) (string, error) {
 	run := c.Run
@@ -117,7 +165,7 @@ func (c *ytdlClient) exec(args []string, opts ytdlExecOptions) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), ytdlExecTimeout)
 	defer cancel()
 
-	stdout, stderr, err := run(ctx, "yt-dlp", runArgs...)
+	stdout, stderr, err := run(ctx, c.binary(), runArgs...)
 	if err != nil {
 		failure := ytdlClassifyFailure(stderr, err.Error(), err)
 		logStderr := failure.Stderr
@@ -125,6 +173,8 @@ func (c *ytdlClient) exec(args []string, opts ytdlExecOptions) (string, error) {
 			logStderr = logStderr[:4000]
 		}
 		slog.Warn("ytdl: yt-dlp falló",
+			"binary", c.binary(),
+			"player_client", ytdlPlayerClient(runArgs),
 			"kind", failure.Kind,
 			"detail", failure.Detail,
 			"stderr", logStderr,
@@ -492,22 +542,38 @@ func ytdlCommandEnv() []string {
 	if home == "" {
 		home = os.Getenv("HOME")
 	}
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if home != "" {
-		parts = append(parts, filepath.Join(home, ".deno", "bin"))
+		parts = append(parts,
+			filepath.Join(home, ".local", "bin"),
+			filepath.Join(home, ".deno", "bin"),
+		)
 	}
 	parts = append(parts, "/usr/local/bin")
 	if path := os.Getenv("PATH"); path != "" {
 		parts = append(parts, path)
 	}
+	seen := map[string]bool{}
+	uniq := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		uniq = append(uniq, p)
+	}
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, "PATH=") {
+		// PM2 inyecta NODE_CHANNEL_FD para su propio IPC; Deno lo hereda e
+		// intenta abrir un canal que no existe, rompiendo el n-challenge.
+		if strings.HasPrefix(entry, "PATH=") ||
+			strings.HasPrefix(entry, "NODE_CHANNEL_FD=") ||
+			strings.HasPrefix(entry, "NODE_CHANNEL_SERIALIZATION_MODE=") {
 			continue
 		}
 		env = append(env, entry)
 	}
-	return append(env, "PATH="+strings.Join(parts, ":"))
+	return append(env, "PATH="+strings.Join(uniq, ":"))
 }
 
 func YtdlFindRuntimesDefault() (deno, node string) {

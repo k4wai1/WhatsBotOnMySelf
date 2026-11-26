@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"image"
 	_ "image/gif"
-	_ "image/jpeg"
+	"image/jpeg"
 	_ "image/png"
 	"net/http"
 	"path/filepath"
@@ -15,6 +15,7 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"golang.org/x/image/webp"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -38,6 +39,7 @@ func (c *Context) SendImageID(data []byte, caption string) (types.MessageID, err
 }
 
 func (c *Context) buildImageMessage(data []byte, caption string) (*waE2E.Message, error) {
+	data = normalizeImageForUpload(data)
 	if len(data) == 0 {
 		return nil, fmt.Errorf("imagen vacía")
 	}
@@ -247,6 +249,26 @@ func imageSize(data []byte) (uint32, uint32) {
 		return 0, 0
 	}
 	return uint32(cfg.Width), uint32(cfg.Height)
+}
+
+// normalizeImageForUpload convierte WebP a JPEG: WhatsApp no acepta bien
+// imágenes WebP con mimetype/dimensiones no estándar en ImageMessage.
+func normalizeImageForUpload(data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	if _, err := webp.DecodeConfig(bytes.NewReader(data)); err != nil {
+		return data
+	}
+	img, err := webp.Decode(bytes.NewReader(data))
+	if err != nil {
+		return data
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
+		return data
+	}
+	return buf.Bytes()
 }
 
 func detectMime(data []byte, fallback string) string {
