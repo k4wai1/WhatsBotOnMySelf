@@ -698,39 +698,32 @@ func saMimeExt(mimetype string) string {
 // ─── EXIF opcional (pack name / publisher) ────────────────────────────────
 
 func saPackName() string {
-	return wagoGetenv("SA_PACK_NAME", "ᐟ⋆｡Wboms Bot • Free • Opensource •°✩　")
+	return wagoGetenv("STICKER_PACK_NAME", wagoGetenv("SA_PACK_NAME", "Yruppa Bot • Free/Gratis"))
 }
 
 func saPackPublisher() string {
-	return wagoGetenv("SA_PACK_PUBLISHER", "https://github.com/k4wai1/WhatsBotOnMySelf")
+	return wagoGetenv("STICKER_PACK_PUBLISHER", wagoGetenv("SA_PACK_PUBLISHER", "github.com/k4wai1/WhatsBotOnMySelf"))
 }
 
-// saExifBlob construye un EXIF mínimo con UserComment en ASCII.
+var saExifHeader = []byte{
+	0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x41, 0x57,
+	0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00,
+}
+
+// saExifBlob construye el EXIF que WhatsApp lee: cabecera TIFF de 22 bytes
+// con tag 0x5741 y el JSON UTF-8 justo después.
 func saExifBlob(pack, publisher string) []byte {
 	payload, _ := json.Marshal(map[string]any{
 		"sticker-pack-id":        "com.whatsbot.sa",
 		"sticker-pack-name":      pack,
 		"sticker-pack-publisher": publisher,
-		"emojis":                 []string{"🎵"},
+		"emojis":                 []string{""},
 	})
-	userComment := append([]byte("ASCII\x00\x00\x00"), payload...)
-
-	buf := make([]byte, 0, 26+len(userComment))
-	// Cabecera TIFF little-endian.
-	buf = append(buf, 'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00)
-	// IFD0 con una sola entrada.
-	var count [2]byte
-	binary.LittleEndian.PutUint16(count[:], 1)
-	buf = append(buf, count[:]...)
-	entry := make([]byte, 12)
-	binary.LittleEndian.PutUint16(entry[0:], 0x9286) // UserComment
-	binary.LittleEndian.PutUint16(entry[2:], 7)      // UNDEFINED
-	binary.LittleEndian.PutUint32(entry[4:], uint32(len(userComment)))
-	binary.LittleEndian.PutUint32(entry[8:], 26) // offset tras la IFD
-	buf = append(buf, entry...)
-	buf = append(buf, 0x00, 0x00, 0x00, 0x00) // siguiente IFD
-	buf = append(buf, userComment...)
-	return append([]byte("Exif\x00\x00"), buf...)
+	buf := make([]byte, len(saExifHeader)+len(payload))
+	copy(buf, saExifHeader)
+	binary.LittleEndian.PutUint32(buf[14:18], uint32(len(payload)))
+	copy(buf[len(saExifHeader):], payload)
+	return buf
 }
 
 // saApplyExif inyecta metadatos si webpmux está disponible; si no, no-op.

@@ -2,6 +2,8 @@ package addons
 
 import (
 	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"image/png"
 	"os"
 	"os/exec"
@@ -374,8 +376,8 @@ func TestSaClassifyAudioSticker(t *testing.T) {
 
 func TestSaExifBlob(t *testing.T) {
 	blob := saExifBlob("Mi Pack", "Mi Publisher")
-	if !bytes.HasPrefix(blob, []byte("Exif\x00\x00")) {
-		t.Fatal("falta la cabecera Exif")
+	if !bytes.HasPrefix(blob, []byte{0x49, 0x49, 0x2A, 0x00}) {
+		t.Fatal("falta la cabecera TIFF de WhatsApp")
 	}
 	if !bytes.Contains(blob, []byte("Mi Pack")) || !bytes.Contains(blob, []byte("Mi Publisher")) {
 		t.Fatal("faltan pack name / publisher")
@@ -714,10 +716,12 @@ func TestSaBuildWebPTransformacionesFFmpeg(t *testing.T) {
 }
 
 func TestSaPackDefaults(t *testing.T) {
+	t.Setenv("STICKER_PACK_NAME", "")
+	t.Setenv("STICKER_PACK_PUBLISHER", "")
 	t.Setenv("SA_PACK_NAME", "")
 	t.Setenv("SA_PACK_PUBLISHER", "")
-	const pack = "ᐟ⋆｡Wboms Bot • Free • Opensource •°✩　"
-	const pub = "https://github.com/k4wai1/WhatsBotOnMySelf"
+	const pack = "Yruppa Bot • Free/Gratis"
+	const pub = "github.com/k4wai1/WhatsBotOnMySelf"
 	if got := saPackName(); got != pack {
 		t.Fatalf("pack=%q", got)
 	}
@@ -727,6 +731,103 @@ func TestSaPackDefaults(t *testing.T) {
 	blob := saExifBlob(saPackName(), saPackPublisher())
 	if !bytes.Contains(blob, []byte(pack)) || !bytes.Contains(blob, []byte(pub)) {
 		t.Fatal("el EXIF no incluye pack/publisher por defecto")
+	}
+	if len([]rune(pack)) > 25 {
+		t.Fatalf("pack demasiado largo: %d caracteres", len([]rune(pack)))
+	}
+}
+
+func TestSaPackEnvOverrides(t *testing.T) {
+	t.Setenv("STICKER_PACK_NAME", "Pack Custom")
+	t.Setenv("STICKER_PACK_PUBLISHER", "github.com/custom/repo")
+	if got := saPackName(); got != "Pack Custom" {
+		t.Fatalf("pack=%q", got)
+	}
+	if got := saPackPublisher(); got != "github.com/custom/repo" {
+		t.Fatalf("publisher=%q", got)
+	}
+}
+
+func TestSaExifBlobWhatsAppFormat(t *testing.T) {
+	blob := saExifBlob("PackX", "PubY")
+	if len(blob) < 22 {
+		t.Fatalf("EXIF demasiado corto: %d bytes", len(blob))
+	}
+	want := []byte{0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x41, 0x57, 0x07, 0x00}
+	if !bytes.Equal(blob[:14], want) {
+		t.Fatalf("cabecera=%x, esperaba %x", blob[:14], want)
+	}
+	largo := binary.LittleEndian.Uint32(blob[14:18])
+	jsonBytes := blob[22:]
+	if int(largo) != len(jsonBytes) {
+		t.Fatalf("longitud=%d, JSON=%d bytes", largo, len(jsonBytes))
+	}
+	if !json.Valid(jsonBytes) {
+		t.Fatalf("JSON inválido: %q", jsonBytes)
+	}
+	var parsed struct {
+		ID        string   `json:"sticker-pack-id"`
+		Name      string   `json:"sticker-pack-name"`
+		Publisher string   `json:"sticker-pack-publisher"`
+		Emojis    []string `json:"emojis"`
+	}
+	if err := json.Unmarshal(jsonBytes, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.ID != "com.whatsbot.sa" || parsed.Name != "PackX" || parsed.Publisher != "PubY" || len(parsed.Emojis) != 1 {
+		t.Fatalf("JSON inesperado: %+v", parsed)
+	}
+}
+
+func TestSaApplyExifChunkWebP(t *testing.T) {
+	for _, bin := range []string{"ffmpeg", "webpmux"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s no disponible", bin)
+		}
+	}
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.webp")
+	cmd := exec.Command("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=512x512", "-frames:v", "1", in)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("ffmpeg: %v %s", err, out)
+	}
+	original, err := os.ReadFile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := saApplyExif(original)
+	if len(out) <= len(original) {
+		t.Fatalf("EXIF no inyectado: %d → %d bytes", len(original), len(out))
+	}
+	var exif []byte
+	var exifFlag byte
+	i := 12
+	for i+8 <= len(out) {
+		id := string(out[i : i+4])
+		size := int(binary.LittleEndian.Uint32(out[i+4 : i+8]))
+		body := out[i+8 : i+8+size]
+		if id == "EXIF" {
+			exif = body
+		}
+		if id == "VP8X" && len(body) > 0 {
+			exifFlag = body[0]
+		}
+		i += 8 + size + (size & 1)
+	}
+	if len(exif) < 22 {
+		t.Fatalf("chunk EXIF ausente o corto: %d bytes", len(exif))
+	}
+	if exifFlag&0x08 == 0 {
+		t.Fatalf("flag de EXIF no activado en VP8X: %x", exifFlag)
+	}
+	if !bytes.Equal(exif[:12], []byte{0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x41, 0x57}) {
+		t.Fatalf("chunk EXIF no es formato WhatsApp: %x", exif[:12])
+	}
+	if largo := int(binary.LittleEndian.Uint32(exif[14:18])); largo != len(exif[22:]) {
+		t.Fatalf("longitud=%d, JSON=%d bytes", largo, len(exif[22:]))
+	}
+	if !json.Valid(exif[22:]) {
+		t.Fatalf("JSON inválido en el chunk: %q", exif[22:])
 	}
 }
 
