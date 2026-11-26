@@ -226,11 +226,11 @@ type saArgs struct {
 	Reverse bool
 	Stretch bool
 	Shape   string // "none" | "spherical" | "border"
-	Mode    string // "fluid" | "high"
+	Mode    string // "default" | "fluid" | "high"
 }
 
 func saParseArgs(args []string) saArgs {
-	out := saArgs{Shape: "none", Mode: "fluid"}
+	out := saArgs{Shape: "none", Mode: "default"}
 	var numbers []float64
 	for _, raw := range args {
 		for _, token := range strings.Fields(strings.ToLower(raw)) {
@@ -346,17 +346,21 @@ func saCalcFPS(duration float64) int {
 // saCalcFPSMode aplica el modo `high` de `.st` (mas fps) sobre el esquema
 // adaptativo de `.sa`, siempre acotado al tope de 10 s.
 func saCalcFPSMode(mode string, duration float64) int {
-	if mode != "high" {
-		return saCalcFPS(duration)
+	if mode == "high" {
+		switch {
+		case duration < 3.0:
+			return 30
+		case duration < 6.0:
+			return 24
+		default:
+			return 18
+		}
 	}
-	switch {
-	case duration < 3.0:
-		return 30
-	case duration < 6.0:
-		return 24
-	default:
-		return 18
+	base := saCalcFPS(duration)
+	if mode == "fluid" {
+		return int(math.Round(float64(base) * 1.25))
 	}
+	return base
 }
 
 func saQualityRange(animated bool) (int, int) {
@@ -525,6 +529,8 @@ func saEncodeStaticWebP(inputPath, outputPath string, limit int, filter string) 
 }
 
 // saEncodeAnimatedWebP extrae frames a fps adaptativo y los recodifica.
+// Nunca devuelve un WebP que supere el presupuesto: ajusta calidad y, si hace
+// falta, reduce los frames en pasos fijos hasta que quepa.
 func saEncodeAnimatedWebP(inputPath, outputPath string, start, duration float64, limit int, a saArgs) ([]byte, error) {
 	workDir, err := saMkdirTemp("", "sa_anim_")
 	if err != nil {
@@ -549,81 +555,94 @@ func saEncodeAnimatedWebP(inputPath, outputPath string, start, duration float64,
 	if a.Reverse {
 		finalDuration = duration * 2
 	}
+
+	budget := limit - saExifOverhead()
+	if budget < limit/2 {
+		budget = limit / 2
+	}
 	fps := saCalcFPSMode(a.Mode, finalDuration)
 	filter := saVisualFilter(a)
 	framesPattern := filepath.Join(framesDir, "frame_%04d.png")
+	qMin, qMax := saQualityRange(true)
+	var best []byte
 
-	args := []string{"-y", "-err_detect", "ignore_err"}
-	if start > 0 {
-		args = append(args, "-ss", saFormatFloat(start))
-	}
-	args = append(args, "-i", inputPath, "-t", saFormatFloat(duration),
-		"-c:v", "png", "-pix_fmt", "rgba",
-		"-vf", fmt.Sprintf("fps=%d,%s", fps, filter), framesPattern)
+	for intento := 0; intento < 8; intento++ {
+		if err := os.RemoveAll(framesDir); err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(framesDir, 0o755); err != nil {
+			return nil, err
+		}
 
-	if err := saRunFFmpeg(args...); err != nil {
-		return nil, err
-	}
+		args := []string{"-y", "-err_detect", "ignore_err"}
+		if start > 0 {
+			args = append(args, "-ss", saFormatFloat(start))
+		}
+		args = append(args, "-i", inputPath, "-t", saFormatFloat(duration),
+			"-c:v", "png", "-pix_fmt", "rgba",
+			"-vf", fmt.Sprintf("fps=%d,%s", fps, filter), framesPattern)
+		if err := saRunFFmpeg(args...); err != nil {
+			return nil, err
+		}
 
-	framePrefix := "frame_%04d.png"
-	if a.Reverse {
-		if _, err := os.Stat(framesPattern); err != nil {
+		framePrefix := "frame_%04d.png"
+		if a.Reverse {
+			if _, err := os.Stat(framesPattern); err != nil {
+				return nil, fmt.Errorf("no se extrajeron frames del vídeo")
+			}
+			if err := stickersReverseFrames(framesDir); err != nil {
+				return nil, err
+			}
+			framePrefix = "loop_%04d.png"
+		}
+		files, _ := filepath.Glob(filepath.Join(framesDir, "frame_*.png"))
+		if len(files) == 0 {
 			return nil, fmt.Errorf("no se extrajeron frames del vídeo")
 		}
-		if err := stickersReverseFrames(framesDir); err != nil {
-			return nil, err
-		}
-		framePrefix = "loop_%04d.png"
-	}
+		encodePattern := filepath.Join(framesDir, framePrefix)
 
-	files, _ := filepath.Glob(filepath.Join(framesDir, "*.png"))
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no se extrajeron frames del vídeo")
-	}
-	encodePattern := filepath.Join(framesDir, framePrefix)
-
-	qMin, qMax := saQualityRange(true)
-	target := float64(limit) * 0.90
-	margin := float64(limit) * 0.05
-	var best []byte
-	bestDiff := math.Inf(1)
-
-	for i := 0; i < 5; i++ {
-		q := (qMin + qMax) / 2
-		enc := []string{
-			"-y", "-framerate", strconv.Itoa(fps), "-i", encodePattern,
-			"-c:v", "libwebp", "-lossless", "0", "-q:v", strconv.Itoa(q),
-			"-compression_level", "4", "-loop", "0", "-an", outputPath,
+		lo, hi := qMin, qMax
+		for i := 0; i < 7; i++ {
+			q := (lo + hi) / 2
+			enc := []string{
+				"-y", "-framerate", strconv.Itoa(fps), "-i", encodePattern,
+				"-c:v", "libwebp", "-lossless", "0", "-q:v", strconv.Itoa(q),
+				"-compression_level", "4", "-loop", "0", "-an", outputPath,
+			}
+			if err := saRunFFmpeg(enc...); err != nil {
+				return nil, err
+			}
+			current, err := os.ReadFile(outputPath)
+			if err != nil {
+				return nil, err
+			}
+			if len(current) <= budget && (best == nil || len(current) > len(best)) {
+				best = current
+				lo = q + 1
+				continue
+			}
+			hi = q - 1
+			if hi < lo {
+				break
+			}
 		}
-		if err := saRunFFmpeg(enc...); err != nil {
-			return nil, err
+		if best != nil {
+			slog.Info("Sticker animado ajustado", "fps", fps, "bytes", len(best), "limite", limit)
+			return best, nil
 		}
-		current, err := os.ReadFile(outputPath)
-		if err != nil {
-			return nil, err
+		siguiente := int(math.Floor(float64(fps) * 0.8))
+		if siguiente >= fps {
+			siguiente = fps - 1
 		}
-		size := float64(len(current))
-		diff := math.Abs(target - size)
-		if len(current) <= limit && diff < bestDiff {
-			best = current
-			bestDiff = diff
+		if siguiente < 5 {
+			siguiente = 5
 		}
-		if size >= target-margin && size <= target+margin {
-			break
-		}
-		if size > target {
-			qMax = q - 1
-		} else {
-			qMin = q + 1
-		}
-		if qMax < qMin {
+		fps = siguiente
+		if intento >= 5 && fps == 5 {
 			break
 		}
 	}
-	if best != nil {
-		return best, nil
-	}
-	return os.ReadFile(outputPath)
+	return nil, fmt.Errorf("no se pudo ajustar el sticker animado al tamaño permitido")
 }
 
 // saWebPDims lee las dimensiones de un WebP sin depender de ffprobe.

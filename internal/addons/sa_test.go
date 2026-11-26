@@ -25,13 +25,13 @@ func TestSaCommands(t *testing.T) {
 }
 
 func TestSaParseArgs(t *testing.T) {
-	def := saArgs{Shape: "none", Mode: "fluid"}
+	def := saArgs{Shape: "none", Mode: "default"}
 	conDef := func(a saArgs) saArgs {
 		if a.Shape == "" {
 			a.Shape = "none"
 		}
 		if a.Mode == "" {
-			a.Mode = "fluid"
+			a.Mode = "default"
 		}
 		return a
 	}
@@ -61,8 +61,8 @@ func TestSaParseArgs(t *testing.T) {
 		{[]string{"b"}, conDef(saArgs{Shape: "border"})},
 		{[]string{"high"}, conDef(saArgs{Mode: "high"})},
 		{[]string{"h"}, conDef(saArgs{Mode: "high"})},
-		{[]string{"fluid"}, def},
-		{[]string{"f"}, def},
+		{[]string{"fluid"}, conDef(saArgs{Mode: "fluid"})},
+		{[]string{"f"}, conDef(saArgs{Mode: "fluid"})},
 		{[]string{"crop", "e", "b", "0:02", "3"}, conDef(saArgs{Crop: true, Stretch: true, Shape: "border", Start: 2, Duration: 3})},
 	}
 	for _, caso := range casos {
@@ -658,8 +658,16 @@ func TestSaVisualFilterEfectos(t *testing.T) {
 }
 
 func TestSaCalcFPSMode(t *testing.T) {
-	if got := saCalcFPSMode("fluid", 0.5); got != saCalcFPS(0.5) {
-		t.Fatalf("modo fluid=%d", got)
+	if got := saCalcFPSMode("default", 0.5); got != saCalcFPS(0.5) {
+		t.Fatalf("modo default=%d", got)
+	}
+	for _, caso := range []struct {
+		dur  float64
+		want int
+	}{{1, 25}, {4, 20}, {9, 15}} {
+		if got := saCalcFPSMode("fluid", caso.dur); got != caso.want {
+			t.Fatalf("modo fluid(%.1f)=%d, esperaba %d", caso.dur, got, caso.want)
+		}
 	}
 	if got := saCalcFPSMode("high", 0.5); got != 30 {
 		t.Fatalf("modo high corto=%d, esperaba 30", got)
@@ -853,5 +861,31 @@ func TestSaCurvaCalidad10s(t *testing.T) {
 	}
 	if _, max := saQualityRange(true); max != 100 {
 		t.Fatalf("calidad máxima=%d, esperaba 100", max)
+	}
+}
+
+func TestSaEncodeAnimatedWebPRespetaPresupuesto(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg no disponible")
+	}
+	dir := t.TempDir()
+	video := filepath.Join(dir, "in.mp4")
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc2=size=512x512:rate=30", "-t", "2",
+		"-c:v", "libx264", "-preset", "ultrafast", video)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("ffmpeg: %v %s", err, out)
+	}
+	limit := 80 * 1024
+	outPath := filepath.Join(dir, "out.webp")
+	webp, err := saEncodeAnimatedWebP(video, outPath, 0, 2, limit, saArgs{Shape: "none", Mode: "high"})
+	if err != nil {
+		t.Fatalf("saEncodeAnimatedWebP: %v", err)
+	}
+	if len(webp) == 0 || len(webp) > limit-saExifOverhead() {
+		t.Fatalf("WebP fuera del presupuesto: %d bytes, límite %d", len(webp), limit-saExifOverhead())
+	}
+	if len(saApplyExif(webp)) > limit {
+		t.Fatal("el WebP con EXIF supera el límite")
 	}
 }
