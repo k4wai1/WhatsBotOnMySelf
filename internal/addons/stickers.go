@@ -570,7 +570,7 @@ func stickersProcessStatic(buffer []byte, isCrop bool, shapeMode, diskDir, uniqu
 	if best != nil {
 		return best, nil
 	}
-	return os.ReadFile(outputPath)
+	return nil, fmt.Errorf("no se pudo ajustar el sticker estático al tamaño permitido")
 }
 
 // ─── Procesamiento animado ──────────────────────────────────────────────────
@@ -674,7 +674,7 @@ func stickersProcessAnimated(buffer []byte, mode string, isCrop, isReverse bool,
 	if best != nil {
 		return best, nil
 	}
-	return os.ReadFile(outputPath)
+	return nil, fmt.Errorf("no se pudo ajustar el sticker animado al tamaño permitido")
 }
 
 // stickersReverseFrameSequence replica el mapeo de frames del original.

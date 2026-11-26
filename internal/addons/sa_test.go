@@ -90,11 +90,11 @@ func TestSaParseClock(t *testing.T) {
 
 func TestSaPlanLimits(t *testing.T) {
 	estatico := saPlanFor(false)
-	if estatico.SizeLimit != 100*1024 || estatico.MaxAudio != 10 || estatico.Animated {
+	if estatico.SizeLimit != 100_000 || estatico.MaxAudio != 10 || estatico.Animated {
 		t.Fatalf("plan estático=%+v", estatico)
 	}
 	animado := saPlanFor(true)
-	if animado.SizeLimit != 1024*1024 || animado.MaxAudio != 10 || !animado.Animated {
+	if animado.SizeLimit != 1_000_000 || animado.MaxAudio != 10 || !animado.Animated {
 		t.Fatalf("plan animado=%+v", animado)
 	}
 }
@@ -414,7 +414,12 @@ func TestSaBuildWebPReutilizaSticker(t *testing.T) {
 	original[24], original[25] = 0xFF, 0x01 // 512
 	original[27], original[28] = 0xFF, 0x01 // 512
 	v := &saVisual{Data: original, Mimetype: "image/webp", Animated: false, IsSticker: true, IsVideo: true}
-	out, err := saBuildWebP(v, saPlanFor(false), saArgs{Shape: "none", Mode: "fluid"}, 0, 5)
+	plan := saPlanFor(false)
+	budget, finalLimit, err := saWebPBudget(plan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := saBuildWebP(v, plan, saArgs{Shape: "none", Mode: "fluid"}, 0, 5, budget, finalLimit)
 	if err != nil {
 		t.Fatalf("saBuildWebP: %v", err)
 	}
@@ -504,7 +509,12 @@ func TestSaPipelineFFmpeg(t *testing.T) {
 	}
 
 	vis := &saVisual{Data: video, Mimetype: "video/mp4", Animated: true, IsVideo: true}
-	webp, err := saBuildWebP(vis, saPlanFor(true), saArgs{Shape: "none", Mode: "fluid"}, 0, 1.2)
+	plan := saPlanFor(true)
+	budget, finalLimit, err := saWebPBudget(plan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	webp, err := saBuildWebP(vis, plan, saArgs{Shape: "none", Mode: "fluid"}, 0, 1.2, budget, finalLimit)
 	if err != nil {
 		t.Fatalf("saBuildWebP: %v", err)
 	}
@@ -707,9 +717,14 @@ func TestSaBuildWebPTransformacionesFFmpeg(t *testing.T) {
 		"spherical": {Crop: true, Shape: "spherical", Mode: "fluid"},
 		"border":    {Shape: "border", Mode: "fluid"},
 	}
+	plan := saPlanFor(false)
+	budget, finalLimit, err := saWebPBudget(plan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for nombre, args := range casos {
 		v := &saVisual{Data: img, Mimetype: "image/png"}
-		webp, err := saBuildWebP(v, saPlanFor(false), args, 0, 5)
+		webp, err := saBuildWebP(v, plan, args, 0, 5, budget, finalLimit)
 		if err != nil {
 			t.Fatalf("%s: saBuildWebP: %v", nombre, err)
 		}
@@ -845,10 +860,10 @@ func TestSaLimitesStickerAudioAnimado(t *testing.T) {
 	}
 }
 
-func TestSaExifOverhead(t *testing.T) {
-	overhead := saExifOverhead()
-	if overhead <= 0 || overhead > 8*1024 {
-		t.Fatalf("overhead inesperado: %d", overhead)
+func TestSaExifReserve(t *testing.T) {
+	reserve := saExifReserve()
+	if reserve < saMinExifReserve || reserve < len(saExifBlob(saPackName(), saPackPublisher()))+64 {
+		t.Fatalf("reserva insuficiente: %d", reserve)
 	}
 }
 
@@ -876,16 +891,80 @@ func TestSaEncodeAnimatedWebPRespetaPresupuesto(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("ffmpeg: %v %s", err, out)
 	}
-	limit := 80 * 1024
+	plan := saPlan{Animated: true, SizeLimit: 80 * 1024, MaxAudio: 2}
+	budget, finalLimit, err := saWebPBudget(plan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	outPath := filepath.Join(dir, "out.webp")
-	webp, err := saEncodeAnimatedWebP(video, outPath, 0, 2, limit, saArgs{Shape: "none", Mode: "high"})
+	webp, err := saEncodeAnimatedWebP(video, outPath, 0, 2, budget, saArgs{Shape: "none", Mode: "high"})
 	if err != nil {
 		t.Fatalf("saEncodeAnimatedWebP: %v", err)
 	}
-	if len(webp) == 0 || len(webp) > limit-saExifOverhead() {
-		t.Fatalf("WebP fuera del presupuesto: %d bytes, límite %d", len(webp), limit-saExifOverhead())
+	if len(webp) == 0 || len(webp) > budget {
+		t.Fatalf("WebP fuera del presupuesto: %d bytes, límite %d", len(webp), budget)
 	}
-	if len(saApplyExif(webp)) > limit {
+	if len(saApplyExif(webp)) > finalLimit {
 		t.Fatal("el WebP con EXIF supera el límite")
+	}
+}
+
+func TestSaWebPBudget(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg no disponible")
+	}
+	dir := t.TempDir()
+	oggPath := filepath.Join(dir, "in.ogg")
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "10",
+		"-vn", "-c:a", "libopus", "-ac", "1", "-ar", "48000", "-b:a", "64k", oggPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("ffmpeg: %v %s", err, out)
+	}
+	ogg, err := os.ReadFile(oggPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ogg) < 50_000 {
+		t.Fatalf("audio de prueba demasiado corto: %d bytes", len(ogg))
+	}
+
+	reserve := saExifReserve()
+	margin := int(float64(saAnimatedLimit) * saSafetyMarginPct / 100)
+	plan := saPlanFor(true)
+
+	t.Setenv("SA_COMBINED_BUDGET", "")
+	if saCombinedBudgetEnabled() {
+		t.Fatal("el modo combinado debe estar desactivado por defecto")
+	}
+	budget, finalLimit, err := saWebPBudget(plan, len(ogg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalLimit != saAnimatedLimit || budget != saAnimatedLimit-reserve-margin {
+		t.Fatalf("presupuesto=%d límite=%d, esperaba %d/%d", budget, finalLimit, saAnimatedLimit-reserve-margin, saAnimatedLimit)
+	}
+
+	t.Setenv("SA_COMBINED_BUDGET", "true")
+	combinedBudget, combinedLimit, err := saWebPBudget(plan, len(ogg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLimit := saAnimatedLimit - len(ogg)
+	if combinedLimit != wantLimit || combinedBudget != wantLimit-reserve-margin {
+		t.Fatalf("presupuesto=%d límite=%d, esperaba %d/%d", combinedBudget, combinedLimit, wantLimit-reserve-margin, wantLimit)
+	}
+	if combinedBudget >= budget {
+		t.Fatal("el modo combinado debe reducir el presupuesto del WebP")
+	}
+
+	staticPlan := saPlanFor(false)
+	staticBudget, staticLimit, err := saWebPBudget(staticPlan, len(ogg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantStatic := saStaticLimit - saExifReserve() - int(float64(saStaticLimit)*saSafetyMarginPct/100)
+	if staticLimit != saStaticLimit || staticBudget != wantStatic {
+		t.Fatalf("estático: presupuesto=%d límite=%d, esperaba %d/%d", staticBudget, staticLimit, wantStatic, saStaticLimit)
 	}
 }

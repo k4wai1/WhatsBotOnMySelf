@@ -1,6 +1,8 @@
 package addons
 
 import (
+	"context"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -141,5 +143,28 @@ func TestStickersArgBuilders(t *testing.T) {
 		if !strings.Contains(encode, want) {
 			t.Fatalf("args de encode sin %q: %s", want, encode)
 		}
+	}
+}
+
+func TestStickersProcessAnimatedNuncaExcedeLimite(t *testing.T) {
+	if _, err := exec.LookPath("dd"); err != nil {
+		t.Skip("dd no disponible")
+	}
+	prevExec := stickersExec
+	stickersExec = func(_ context.Context, name string, arg ...string) *exec.Cmd {
+		if name == "ffmpeg" && len(arg) > 0 && arg[0] == "-framerate" {
+			return exec.Command("dd", "if=/dev/zero", "of="+arg[len(arg)-1], "bs=1048576", "count=2")
+		}
+		return exec.Command("true")
+	}
+	t.Cleanup(func() { stickersExec = prevExec })
+
+	out, err := stickersProcessAnimated([]byte("x"), "default", false, false, "none",
+		t.TempDir(), "limite", "mp4", 1000, false, false)
+	if err == nil {
+		t.Fatalf("debía rechazar el WebP sobredimensionado: %d bytes", len(out))
+	}
+	if len(out) > 0 {
+		t.Fatalf("no debe devolver datos cuando no cabe: %d bytes", len(out))
 	}
 }

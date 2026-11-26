@@ -37,8 +37,10 @@ import (
 
 const (
 	saSize             = 512
-	saStaticLimit      = 100 * 1024
-	saAnimatedLimit    = 1024 * 1024
+	saStaticLimit      = 100_000
+	saAnimatedLimit    = 1_000_000
+	saSafetyMarginPct  = 3
+	saMinExifReserve   = 256
 	saStaticMaxAudio   = 10.0
 	saAudioBitrateKbps = 64
 	saMaxVideoSeconds  = 10.0
@@ -486,15 +488,13 @@ func saNeedsVisualTransform(a saArgs) bool {
 
 // ─── Codificación WebP adaptativa ───────────────────────────────────────────
 
-// saEncodeStaticWebP busca la mejor calidad que quepa en el límite.
-func saEncodeStaticWebP(inputPath, outputPath string, limit int, filter string) ([]byte, error) {
-	qMin, qMax := saQualityRange(false)
-	target := float64(limit) * 0.90
+// saEncodeStaticWebP maximiza la calidad que quepa en el presupuesto.
+func saEncodeStaticWebP(inputPath, outputPath string, budget int, filter string) ([]byte, error) {
+	lo, hi := saQualityRange(false)
 	var best []byte
-	bestDiff := math.Inf(1)
 
-	for i := 0; i < 4; i++ {
-		q := (qMin + qMax) / 2
+	for i := 0; i < 7; i++ {
+		q := (lo + hi) / 2
 		args := []string{
 			"-y", "-err_detect", "ignore_err", "-i", inputPath,
 			"-vcodec", "libwebp", "-lossless", "0", "-q:v", strconv.Itoa(q),
@@ -507,31 +507,26 @@ func saEncodeStaticWebP(inputPath, outputPath string, limit int, filter string) 
 		if err != nil {
 			return nil, err
 		}
-		size := float64(len(current))
-		diff := math.Abs(target - size)
-		if len(current) <= limit && diff < bestDiff {
+		if len(current) <= budget && (best == nil || len(current) > len(best)) {
 			best = current
-			bestDiff = diff
-		}
-		if size > target {
-			qMax = q - 1
+			lo = q + 1
 		} else {
-			qMin = q + 1
+			hi = q - 1
 		}
-		if qMax < qMin {
+		if hi < lo {
 			break
 		}
 	}
-	if best != nil {
-		return best, nil
+	if best == nil {
+		return nil, fmt.Errorf("no se pudo ajustar el sticker estático al tamaño permitido")
 	}
-	return os.ReadFile(outputPath)
+	return best, nil
 }
 
 // saEncodeAnimatedWebP extrae frames a fps adaptativo y los recodifica.
 // Nunca devuelve un WebP que supere el presupuesto: ajusta calidad y, si hace
 // falta, reduce los frames en pasos fijos hasta que quepa.
-func saEncodeAnimatedWebP(inputPath, outputPath string, start, duration float64, limit int, a saArgs) ([]byte, error) {
+func saEncodeAnimatedWebP(inputPath, outputPath string, start, duration float64, budget int, a saArgs) ([]byte, error) {
 	workDir, err := saMkdirTemp("", "sa_anim_")
 	if err != nil {
 		return nil, err
@@ -556,10 +551,6 @@ func saEncodeAnimatedWebP(inputPath, outputPath string, start, duration float64,
 		finalDuration = duration * 2
 	}
 
-	budget := limit - saExifOverhead()
-	if budget < limit/2 {
-		budget = limit / 2
-	}
 	fps := saCalcFPSMode(a.Mode, finalDuration)
 	filter := saVisualFilter(a)
 	framesPattern := filepath.Join(framesDir, "frame_%04d.png")
@@ -627,7 +618,7 @@ func saEncodeAnimatedWebP(inputPath, outputPath string, start, duration float64,
 			}
 		}
 		if best != nil {
-			slog.Info("Sticker animado ajustado", "fps", fps, "bytes", len(best), "limite", limit)
+			slog.Info("Sticker animado ajustado", "fps", fps, "bytes", len(best), "presupuesto", budget)
 			return best, nil
 		}
 		siguiente := int(math.Floor(float64(fps) * 0.8))
@@ -745,10 +736,40 @@ func saExifBlob(pack, publisher string) []byte {
 	return buf
 }
 
-// saApplyExif inyecta metadatos si webpmux está disponible; si no, no-op.
-// saExifOverhead estima los bytes que webpmux añade al incrustar el EXIF.
-func saExifOverhead() int {
-	return 8 + len(saExifBlob(saPackName(), saPackPublisher()))
+// saCombinedBudgetEnabled activa el modo conservador que descuenta el audio
+// del presupuesto del WebP. Por defecto WhatsApp valida cada archivo por
+// separado, así que el modo normal reserva el límite completo para la imagen.
+func saCombinedBudgetEnabled() bool {
+	return strings.ToLower(wagoGetenv("SA_COMBINED_BUDGET", "false")) == "true"
+}
+
+// saExifReserve reserva espacio suficiente para el chunk EXIF que webpmux
+// añade: el blob más 64 B de cabecera/alineación, con un mínimo de 256 B.
+func saExifReserve() int {
+	reserve := len(saExifBlob(saPackName(), saPackPublisher())) + 64
+	if reserve < saMinExifReserve {
+		reserve = saMinExifReserve
+	}
+	return reserve
+}
+
+// saWebPBudget calcula el presupuesto determinista del WebP y el tope final
+// permitido para el WebP ya con EXIF. audioBytes es el tamaño real del OGG
+// codificado previamente; solo se descuenta en stickers animados y si se
+// activa SA_COMBINED_BUDGET, porque es el único caso con límite de 1 MB
+// compartido entre dos archivos.
+func saWebPBudget(plan saPlan, audioBytes int) (budget, finalLimit int, err error) {
+	finalLimit = plan.SizeLimit
+	if plan.Animated && saCombinedBudgetEnabled() && audioBytes > 0 {
+		finalLimit -= audioBytes
+	}
+	reserve := saExifReserve()
+	margin := int(float64(plan.SizeLimit) * saSafetyMarginPct / 100)
+	budget = finalLimit - reserve - margin
+	if budget < plan.SizeLimit/4 {
+		return 0, 0, fmt.Errorf("el audio (%d B) deja poco espacio para el sticker animado", audioBytes)
+	}
+	return budget, finalLimit, nil
 }
 
 func saApplyExif(webp []byte) []byte {
@@ -1236,12 +1257,17 @@ func (a *saAddon) Handle(ctx *core.Context) error {
 		return err
 	}
 
-	webp, err := saBuildWebP(visual, plan, args, args.Start, visualDuration)
+	// El audio se codifica primero: su tamaño real determina el presupuesto.
+	ogg, seconds, err := saPrepareAudio(ctx, audioData, audioSeconds, audioMax, args.Start)
 	if err != nil {
 		return saFail(ctx, err)
 	}
 
-	ogg, seconds, err := saPrepareAudio(ctx, audioData, audioSeconds, audioMax, args.Start)
+	budget, finalLimit, err := saWebPBudget(plan, len(ogg))
+	if err != nil {
+		return saFail(ctx, err)
+	}
+	webp, err := saBuildWebP(visual, plan, args, args.Start, visualDuration, budget, finalLimit)
 	if err != nil {
 		return saFail(ctx, err)
 	}
@@ -1307,8 +1333,10 @@ func saVisualFrom(ctx *core.Context, media saMedia) (*saVisual, error) {
 	return v, nil
 }
 
-// saBuildWebP reutiliza el WebP de un sticker si ya cumple, o lo recodifica.
-func saBuildWebP(v *saVisual, plan saPlan, args saArgs, start, duration float64) ([]byte, error) {
+// saBuildWebP reutiliza el WebP de un sticker si ya cumple, o lo recodifica
+// dentro del presupuesto determinista. El WebP devuelto nunca supera finalLimit,
+// ni antes ni después de inyectar el EXIF.
+func saBuildWebP(v *saVisual, plan saPlan, args saArgs, start, duration float64, budget, finalLimit int) ([]byte, error) {
 	if v == nil {
 		return nil, fmt.Errorf("falta el medio visual")
 	}
@@ -1323,11 +1351,13 @@ func saBuildWebP(v *saVisual, plan saPlan, args saArgs, start, duration float64)
 
 	// Solo se reutiliza el WebP original si no hay transformaciones pedidas.
 	if v.IsSticker && !saNeedsVisualTransform(args) && !args.Reverse {
-		if w, h, ok := saWebPDims(v.Data); ok && w == saSize && h == saSize && len(v.Data)+saExifOverhead() <= plan.SizeLimit {
-			if out := saApplyExif(v.Data); len(out) <= plan.SizeLimit {
+		if w, h, ok := saWebPDims(v.Data); ok && w == saSize && h == saSize && len(v.Data) <= budget {
+			if out := saApplyExif(v.Data); len(out) > 0 && len(out) <= finalLimit {
 				return out, nil
 			}
-			return v.Data, nil
+			if len(v.Data) <= finalLimit {
+				return v.Data, nil
+			}
 		}
 	}
 
@@ -1343,21 +1373,24 @@ func saBuildWebP(v *saVisual, plan saPlan, args saArgs, start, duration float64)
 			// Un sticker animado ya trae su propio bucle: no se recorta.
 			encStart, encDur = 0, saMaxVideoSeconds
 		}
-		webp, err = saEncodeAnimatedWebP(inputPath, outputPath, encStart, encDur, plan.SizeLimit, args)
+		webp, err = saEncodeAnimatedWebP(inputPath, outputPath, encStart, encDur, budget, args)
 	} else {
-		webp, err = saEncodeStaticWebP(inputPath, outputPath, plan.SizeLimit, filter)
+		webp, err = saEncodeStaticWebP(inputPath, outputPath, budget, filter)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if len(webp) > plan.SizeLimit {
-		return nil, fmt.Errorf("el WebP (%d KB) supera el límite de %d KB", len(webp)/1024, plan.SizeLimit/1024)
+	if len(webp) > budget {
+		return nil, fmt.Errorf("el WebP (%d B) supera el presupuesto de %d B", len(webp), budget)
 	}
 
-	if len(webp)+saExifOverhead() <= plan.SizeLimit {
-		if out := saApplyExif(webp); len(out) > 0 && len(out) <= plan.SizeLimit {
+	if len(webp)+saExifReserve() <= finalLimit {
+		if out := saApplyExif(webp); len(out) > 0 && len(out) <= finalLimit {
 			webp = out
 		}
+	}
+	if len(webp) > finalLimit {
+		return nil, fmt.Errorf("el WebP con EXIF (%d B) supera el límite de %d B", len(webp), finalLimit)
 	}
 	return webp, nil
 }
