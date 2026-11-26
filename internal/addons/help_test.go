@@ -37,6 +37,11 @@ func helpTestEntries() []helpEntry {
 			Command: "secreto", Title: "Oculto", Category: "utils",
 			Description: "No visible.", Hidden: true,
 		},
+		{
+			Command: "st", Aliases: []string{"sticker", "s"}, Title: "Crear stickers",
+			Category: "stickers", Description: "Convierte fotos o videos en stickers.",
+			HowTo: []string{"Envía una foto con {p}st"}, Examples: []string{"{p}st"},
+		},
 	}
 }
 
@@ -105,10 +110,10 @@ func TestHelpLoadCache(t *testing.T) {
 	t.Cleanup(func() { helpCacheAlt = prev })
 
 	loaded := helpLoadCache()
-	if loaded == nil || loaded.Version != helpCacheVersion || len(loaded.Entries) != 5 {
+	if loaded == nil || loaded.Version != helpCacheVersion || len(loaded.Entries) != 6 {
 		t.Fatalf("caché inesperado: %#v", loaded)
 	}
-	if loaded.AliasMap["sa"] != 0 || loaded.AliasMap[".sticker"] != 0 {
+	if loaded.AliasMap["sa"] != 0 || loaded.AliasMap[".sticker"] != 5 {
 		t.Fatalf("aliasMap inesperado: %#v", loaded.AliasMap)
 	}
 
@@ -292,10 +297,10 @@ func TestHelpRenderCategory(t *testing.T) {
 
 func TestHelpBusquedaPorComandoAliasYCategoria(t *testing.T) {
 	data := helpTestData()
-	for _, query := range []string{"sa", "sticker", "s"} {
+	for query, want := range map[string]string{"sa": "sa", "sticker": "st", "s": "st", "st": "st"} {
 		idx, ok := data.AliasMap[helpNormalize(query)]
-		if !ok || data.Entries[idx].Command != "sa" {
-			t.Fatalf("búsqueda %q: idx=%d ok=%v", query, idx, ok)
+		if !ok || data.Entries[idx].Command != want {
+			t.Fatalf("búsqueda %q: idx=%d ok=%v, esperaba %s", query, idx, ok, want)
 		}
 	}
 	for _, query := range []string{"stickers", "STICKERS Y MULTIMEDIA", "juegos", "descargas", "admin"} {
@@ -364,5 +369,68 @@ func TestHelpSourcesEmbebidas(t *testing.T) {
 	}
 	if _, err := helpComputeHash(); err != nil {
 		t.Fatalf("hash de fuentes embebidas: %v", err)
+	}
+}
+
+func TestHelpPrioridadComandoSobreCategoria(t *testing.T) {
+	data := helpTestData()
+
+	res := helpResolveQuery(data, "st")
+	if res.Category != nil || res.EntryIndex < 0 || data.Entries[res.EntryIndex].Command != "st" {
+		t.Fatalf("!help st debe resolver la ficha del comando st: %+v", res)
+	}
+	ficha := helpRenderEntry(data.Entries[res.EntryIndex], "!")
+	if !strings.Contains(ficha, "!st (también: !sticker, !s) — Crear stickers") {
+		t.Fatalf("la ficha no muestra los alias:\n%s", ficha)
+	}
+	if strings.Contains(ficha, "🎨 Stickers y Multimedia\n") {
+		t.Fatalf("!help st no debe mostrar la categoría:\n%s", ficha)
+	}
+
+	catRes := helpRenderQuerySim(data, "stickers", "!")
+	if !strings.Contains(catRes, "🎨 Stickers y Multimedia") {
+		t.Fatalf("!help stickers debe mostrar la categoría:\n%s", catRes)
+	}
+	if strings.Contains(catRes, "(también:") {
+		t.Fatalf("!help stickers no debe mostrar una ficha:\n%s", catRes)
+	}
+}
+
+func helpRenderQuerySim(data *helpCacheData, query, prefix string) string {
+	res := helpResolveQuery(data, query)
+	if res.EntryIndex >= 0 {
+		return helpRenderEntry(data.Entries[res.EntryIndex], prefix)
+	}
+	if res.Category != nil {
+		return helpRenderCategory(data, prefix, *res.Category)
+	}
+	return helpRenderUnknown(query, prefix)
+}
+
+func TestHelpOpcionesLargasYCortas(t *testing.T) {
+	opciones := []string{
+		"crop / c — recorta en cuadrado",
+		"estirar / e — estira la imagen al cuadrado",
+		"spherical / s — forma redonda",
+		"border / b — borde redondeado",
+		"reverse / r — reproduce al revés",
+		"high / h — más calidad",
+		"auto / wave / onda — genera una onda visual desde un audio",
+		"vertical / v — formato vertical",
+		"horizontal / h — formato horizontal",
+		"color / c — mantiene la foto a color",
+		"audio — saca el audio de un sticker",
+		"invertir — invierte los colores",
+	}
+	e := helpNormalizeEntry(helpEntry{Command: "st", Options: opciones})
+	if len(e.Options) != len(opciones) {
+		t.Fatalf("opciones recortadas: %d de %d", len(e.Options), len(opciones))
+	}
+	ficha := helpRenderEntry(e, "!")
+	if !strings.Contains(ficha, "• crop / c — recorta en cuadrado") || !strings.Contains(ficha, "• auto / wave / onda — genera una onda visual desde un audio") {
+		t.Fatalf("faltan versiones largas/cortas:\n%s", ficha)
+	}
+	if !strings.Contains(helpSystemPrompt, "crop / c — recorta en cuadrado") || strings.Contains(helpSystemPrompt, "máximo 6") {
+		t.Fatal("el prompt debe pedir todas las opciones con versiones largas/cortas juntas")
 	}
 }

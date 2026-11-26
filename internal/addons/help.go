@@ -255,7 +255,10 @@ Devuelve ÚNICAMENTE un array JSON válido, sin texto ni bloques markdown, con u
 REGLAS ESTRICTAS:
 - Usa siempre {p} donde vaya el prefijo del comando (ej: {p}st, {p}yt). Nunca escribas un punto, una exclamación ni una barra fijo delante del comando.
 - "command" es el nombre real del comando sin prefijo. "aliases" son los otros nombres que lo invocan.
-- "title" máximo 30 caracteres. "description" máximo 2 frases. "how_to" de 1 a 3 pasos. "options" máximo 6. "examples" de 1 a 3.
+- "title" máximo 30 caracteres. "description" máximo 2 frases. "how_to" de 1 a 3 pasos. "examples" de 1 a 3.
+- En "options" incluye TODOS los subcomandos, modos y opciones reales que el usuario puede pasar; no los recortes. Si el comando tiene muchas, lista hasta unas 12 de forma compacta.
+- Si una opción o subcomando tiene versión larga y corta (o sinónimos), muestra SIEMPRE todas juntas separadas por / antes del guion. Ejemplos: crop / c — recorta en cuadrado; estirar / e — estira la imagen al cuadrado; spherical / s — forma redonda; border / b — borde redondeado; reverse / r — reproduce al revés; high / h — más calidad; auto / wave / onda — genera una onda visual desde un audio; vertical / v — formato vertical; horizontal / h — formato horizontal; color / c — mantiene la foto a color.
+- El encabezado de la ficha mostrará los alias del comando principal cuando existan; por eso completa siempre "aliases" con todos los nombres cortos y sinónimos reales.
 - "category" debe ser exactamente una de estas claves: stickers, downloads, ai, games, utils, groups, admin.
 - Marca "admin_only": true en comandos internos de diagnóstico, del servidor o del dueño (debug-st, debug-info, debug-pp, sdebug, sysinfo, sistema, server, fetch, speed, prefix, setprefix, restart, getpp, cor, info, files, repo, git). Marca "hidden": true en los que el usuario normal nunca debe ver.
 - Si un límite importa al usuario, exprésalo en lenguaje humano: "videos de hasta 5 segundos", nunca en kilobytes ni nombres de variables.
@@ -360,7 +363,7 @@ func helpNormalizeEntry(e helpEntry) helpEntry {
 	e.Description = strings.TrimSpace(e.Description)
 	e.Category = helpCanonicalCategory(e.Category)
 	e.HowTo = helpLimit(e.HowTo, 3)
-	e.Options = helpLimit(e.Options, 6)
+	e.Options = helpLimit(e.Options, 12)
 	e.Examples = helpLimit(e.Examples, 3)
 	if e.Title == "" {
 		e.Title = e.Command
@@ -683,6 +686,25 @@ func helpRenderEntry(e helpEntry, prefix string) string {
 	return b.String()
 }
 
+type helpResolution struct {
+	EntryIndex int
+	Category   *helpCategory
+}
+
+// helpResolveQuery prioriza comandos y alias sobre los nombres de categoría.
+func helpResolveQuery(data *helpCacheData, query string) helpResolution {
+	if data != nil {
+		key := helpNormalize(query)
+		if idx, ok := data.AliasMap[key]; ok && idx >= 0 && idx < len(data.Entries) {
+			return helpResolution{EntryIndex: idx}
+		}
+	}
+	if cat, ok := helpResolveCategory(query); ok {
+		return helpResolution{EntryIndex: -1, Category: &cat}
+	}
+	return helpResolution{EntryIndex: -1}
+}
+
 func helpRenderUnknown(query, prefix string) string {
 	return "❓ No encontré ayuda para \"" + query + "\".\n" +
 		helpApplyPrefix("💡 Escribe {p}help para ver todo lo que puedes hacer.", prefix)
@@ -756,19 +778,18 @@ func (Help) Handle(ctx *core.Context) error {
 		return ctx.React("📖")
 	}
 
-	if cat, ok := helpResolveCategory(subCmd); ok {
-		if err := ctx.SendQuoted(core.TextMessage(helpRenderCategory(data, prefix, cat)), ctx.Message); err != nil {
-			return err
-		}
-		return ctx.React("📂")
-	}
-
-	key := helpNormalize(subCmd)
-	if idx, ok := data.AliasMap[key]; ok && idx >= 0 && idx < len(data.Entries) {
-		if err := ctx.SendQuoted(core.TextMessage(helpRenderEntry(data.Entries[idx], prefix)), ctx.Message); err != nil {
+	res := helpResolveQuery(data, subCmd)
+	if res.EntryIndex >= 0 {
+		if err := ctx.SendQuoted(core.TextMessage(helpRenderEntry(data.Entries[res.EntryIndex], prefix)), ctx.Message); err != nil {
 			return err
 		}
 		return ctx.React("ℹ️")
+	}
+	if res.Category != nil {
+		if err := ctx.SendQuoted(core.TextMessage(helpRenderCategory(data, prefix, *res.Category)), ctx.Message); err != nil {
+			return err
+		}
+		return ctx.React("📂")
 	}
 
 	_ = ctx.SendQuoted(core.TextMessage(helpRenderUnknown(ctx.Args[0], prefix)), ctx.Message)
